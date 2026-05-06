@@ -8,43 +8,44 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
 
 
-class OperationStatus(str, Enum):
+class RuntimeStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
-    COMPLETED = "completed"
+    FINISHED = "finished"
+
+
+class ResultStatus(str, Enum):
+    NONE = "none"
+    SUCCEEDED = "succeeded"
     FAILED = "failed"
-
-
-class OperationPayload(BaseModel):
-    data: dict[str, Any] = Field(default_factory=dict)
+    CANCELLED = "cancelled"
+    STOPPED = "stopped"
 
 
 class Operation(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     name: str
     agent_id: str
-    payload: OperationPayload = Field(default_factory=OperationPayload)
+    payload: dict[str, Any] = Field(default_factory=dict)
     priority: int = 0
-    status: OperationStatus = OperationStatus.PENDING
+    runtime_status: RuntimeStatus = RuntimeStatus.PENDING
+    result_status: ResultStatus = ResultStatus.NONE
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # actual execution times, set when operation is started/finished
+    start_time: datetime | None = None
+    finish_time: datetime | None = None
 
-class TimedOperation(Operation):
-    planned_start_time: datetime
-    planned_finish_time: datetime
-    actual_start_time: datetime | None = None
-    actual_finish_time: datetime | None = None
+    # scheduling planning times
+    time_window: TimeWindow | None = None
+
+
+class TimeWindow(BaseModel):
+    start: datetime
+    end: datetime
 
     @model_validator(mode="after")
-    def validate_timestamps(self) -> "TimedOperation":
-        if self.planned_finish_time < self.planned_start_time:
-            raise ValueError("planned_finish_time must be after planned_start_time")
-
-        if (
-            self.actual_start_time is not None
-            and self.actual_finish_time is not None
-            and self.actual_finish_time < self.actual_start_time
-        ):
-            raise ValueError("actual_finish_time must be after actual_start_time")
-
+    def validate_window(self) -> "TimeWindow":
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
         return self

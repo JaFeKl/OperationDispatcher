@@ -16,6 +16,10 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+api = [
+  "flask>=3.0,<4.0",
+  "flasgger>=0.9.7.1,<1.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -2,7 +2,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from operation_scheduler import Operation, Schedule, TimedOperation
+from operation_scheduler import (
+    Operation,
+    ResultStatus,
+    RuntimeStatus,
+    Schedule,
+    TimeWindow,
+)
 
 
 def test_add_and_get_next_operation() -> None:
@@ -29,51 +35,56 @@ def test_priority_ordering() -> None:
     assert schedule.next() == low
 
 
-def test_timed_operation_has_planned_and_actual_times() -> None:
+def test_operation_time_window_and_actual_times() -> None:
     now = datetime.now(timezone.utc)
-    timed_operation = TimedOperation(
+    operation = Operation(
         name="timed-sync",
         agent_id="agent-a",
-        planned_start_time=now,
-        planned_finish_time=now + timedelta(minutes=30),
-        actual_start_time=now + timedelta(minutes=1),
-        actual_finish_time=now + timedelta(minutes=28),
+        time_window=TimeWindow(
+            start=now,
+            end=now + timedelta(minutes=30),
+        ),
+        start_time=now + timedelta(minutes=1),
+        finish_time=now + timedelta(minutes=28),
     )
 
-    assert timed_operation.planned_start_time == now
-    assert timed_operation.actual_finish_time == now + timedelta(minutes=28)
+    assert operation.time_window is not None
+    assert operation.time_window.start == now
+    assert operation.finish_time == now + timedelta(minutes=28)
 
 
-def test_timed_operation_rejects_invalid_planned_time_range() -> None:
+def test_time_window_rejects_invalid_range() -> None:
     now = datetime.now(timezone.utc)
 
     with pytest.raises(ValueError):
-        TimedOperation(
-            name="invalid",
-            agent_id="agent-a",
-            planned_start_time=now,
-            planned_finish_time=now - timedelta(minutes=1),
+        TimeWindow(
+            start=now,
+            end=now - timedelta(minutes=1),
         )
 
 
-def test_schedule_orders_timed_operations_by_planned_start_time() -> None:
+def test_schedule_orders_operations_with_time_window_by_start_time() -> None:
     now = datetime.now(timezone.utc)
-    first = TimedOperation(
+    first = Operation(
         name="first",
         agent_id="agent-a",
-        planned_start_time=now + timedelta(minutes=10),
-        planned_finish_time=now + timedelta(minutes=20),
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=10),
+            end=now + timedelta(minutes=20),
+        ),
         priority=1,
     )
-    second = TimedOperation(
+    second = Operation(
         name="second",
         agent_id="agent-a",
-        planned_start_time=now + timedelta(minutes=5),
-        planned_finish_time=now + timedelta(minutes=15),
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=5),
+            end=now + timedelta(minutes=15),
+        ),
         priority=1,
     )
 
-    schedule = Schedule(operation_class=TimedOperation)
+    schedule = Schedule()
     schedule.add(first)
     schedule.add(second)
 
@@ -81,69 +92,117 @@ def test_schedule_orders_timed_operations_by_planned_start_time() -> None:
     assert schedule.next() == first
 
 
-def test_schedule_sets_running_status_on_next_for_timed_operations() -> None:
+def test_schedule_sets_running_status_on_next_for_windowed_operations() -> None:
     now = datetime.now(timezone.utc)
-    operation = TimedOperation(
+    operation = Operation(
         name="timed",
         agent_id="agent-a",
-        planned_start_time=now,
-        planned_finish_time=now + timedelta(minutes=10),
+        time_window=TimeWindow(
+            start=now,
+            end=now + timedelta(minutes=10),
+        ),
     )
-    schedule = Schedule([operation], operation_class=TimedOperation)
+    schedule = Schedule([operation])
 
     next_operation = schedule.next()
 
     assert next_operation is not None
-    assert next_operation.status.value == "running"
+    assert next_operation.runtime_status is RuntimeStatus.RUNNING
+    assert next_operation.result_status is ResultStatus.NONE
 
 
-def test_schedule_with_timed_operation_class_orders_by_planned_start_time() -> None:
+def test_schedule_rejects_windowed_operation_after_plain_queue_type_locked() -> None:
     now = datetime.now(timezone.utc)
-    later = TimedOperation(
+    schedule = Schedule()
+    schedule.add(Operation(name="plain", agent_id="agent-a", priority=1))
+
+    with pytest.raises(ValueError):
+        schedule.add(
+            Operation(
+                name="windowed",
+                agent_id="agent-a",
+                time_window=TimeWindow(
+                    start=now,
+                    end=now + timedelta(minutes=5),
+                ),
+            )
+        )
+
+
+def test_schedule_rejects_plain_operation_after_windowed_queue_type_locked() -> None:
+    now = datetime.now(timezone.utc)
+    schedule = Schedule()
+    schedule.add(
+        Operation(
+            name="windowed",
+            agent_id="agent-a",
+            time_window=TimeWindow(
+                start=now,
+                end=now + timedelta(minutes=5),
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError):
+        schedule.add(Operation(name="plain", agent_id="agent-a", priority=1))
+
+
+def test_schedule_rejects_mixed_queue_types_in_init() -> None:
+    now = datetime.now(timezone.utc)
+
+    with pytest.raises(ValueError):
+        Schedule(
+            operations=[
+                Operation(name="plain", agent_id="agent-a", priority=1),
+                Operation(
+                    name="windowed",
+                    agent_id="agent-a",
+                    time_window=TimeWindow(
+                        start=now,
+                        end=now + timedelta(minutes=5),
+                    ),
+                ),
+            ]
+        )
+
+
+def test_schedule_with_windowed_operations_orders_by_start_then_priority() -> None:
+    now = datetime.now(timezone.utc)
+    later = Operation(
         name="later",
         agent_id="agent-a",
-        planned_start_time=now + timedelta(minutes=20),
-        planned_finish_time=now + timedelta(minutes=30),
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=20),
+            end=now + timedelta(minutes=30),
+        ),
         priority=100,
     )
-    earlier = TimedOperation(
+    earlier = Operation(
         name="earlier",
         agent_id="agent-a",
-        planned_start_time=now + timedelta(minutes=10),
-        planned_finish_time=now + timedelta(minutes=15),
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=10),
+            end=now + timedelta(minutes=15),
+        ),
         priority=1,
     )
 
-    schedule = Schedule(operation_class=TimedOperation)
+    schedule = Schedule()
     schedule.add(later)
     schedule.add(earlier)
 
     assert schedule.next() == earlier
 
 
-def test_schedule_rejects_wrong_operation_type() -> None:
-    now = datetime.now(timezone.utc)
-    schedule = Schedule(operation_class=TimedOperation)
+def test_schedule_accepts_operation_subclass() -> None:
+    class CustomOperation(Operation):
+        special: str
 
-    with pytest.raises(TypeError):
-        schedule.add(Operation(name="normal", agent_id="agent-a"))
+    schedule = Schedule()
 
-    timed = TimedOperation(
-        name="timed",
-        agent_id="agent-a",
-        planned_start_time=now,
-        planned_finish_time=now + timedelta(minutes=5),
-    )
-    schedule.add(timed)
-    assert schedule.next() == timed
-
-
-def test_schedule_rejects_wrong_operation_type_in_init() -> None:
-    with pytest.raises(TypeError):
-        Schedule(
-            operations=[Operation(name="normal", agent_id="agent-a")],
-            operation_class=TimedOperation,
-        )
+    custom = CustomOperation(name="custom", agent_id="agent-a", special="x")
+    schedule.add(custom)
+    assert schedule.next() == custom
 
 
 def test_schedule_rejects_operation_for_different_agent() -> None:
@@ -161,23 +220,25 @@ def test_schedule_rejects_different_agent_in_init_operations() -> None:
         )
 
 
-def test_schedule_rejects_timed_operation_for_different_agent() -> None:
+def test_schedule_rejects_windowed_operation_for_different_agent() -> None:
     now = datetime.now(timezone.utc)
-    timed_operation = TimedOperation(
+    windowed_operation = Operation(
         name="timed-sync",
         agent_id="agent-b",
-        planned_start_time=now,
-        planned_finish_time=now + timedelta(minutes=10),
+        time_window=TimeWindow(
+            start=now,
+            end=now + timedelta(minutes=10),
+        ),
     )
 
-    schedule = Schedule(operation_class=TimedOperation, agent_id="agent-a")
+    schedule = Schedule(agent_id="agent-a")
     with pytest.raises(ValueError):
-        schedule.add(timed_operation)
+        schedule.add(windowed_operation)
 
 
 def test_schedule_agent_id_property_is_exposed() -> None:
     schedule = Schedule(agent_id="agent-a")
-    timed_schedule = Schedule(operation_class=TimedOperation, agent_id="agent-b")
+    timed_schedule = Schedule(agent_id="agent-b")
 
     assert schedule.agent_id == "agent-a"
     assert timed_schedule.agent_id == "agent-b"
@@ -195,7 +256,8 @@ def test_schedule_tracks_pulled_and_completed_operations() -> None:
 
     schedule.complete(operation)
     assert schedule.completed_operations == [operation]
-    assert operation.status.value == "completed"
+    assert operation.runtime_status is RuntimeStatus.FINISHED
+    assert operation.result_status is ResultStatus.SUCCEEDED
 
 
 def test_schedule_complete_requires_pulled_operation() -> None:
@@ -207,21 +269,23 @@ def test_schedule_complete_requires_pulled_operation() -> None:
         schedule.complete(operation)
 
 
-def test_timed_operation_actual_times_are_set_on_pull_and_complete() -> None:
+def test_operation_start_and_finish_times_are_set_on_pull_and_complete() -> None:
     now = datetime.now(timezone.utc)
-    operation = TimedOperation(
+    operation = Operation(
         name="timed",
         agent_id="agent-a",
-        planned_start_time=now,
-        planned_finish_time=now + timedelta(minutes=10),
+        time_window=TimeWindow(
+            start=now,
+            end=now + timedelta(minutes=10),
+        ),
     )
-    schedule = Schedule(operation_class=TimedOperation)
+    schedule = Schedule()
     schedule.add(operation)
 
     pulled = schedule.next()
     assert pulled is operation
-    assert operation.actual_start_time is not None
-    assert operation.actual_finish_time is None
+    assert operation.start_time is not None
+    assert operation.finish_time is None
 
     schedule.complete(operation)
-    assert operation.actual_finish_time is not None
+    assert operation.finish_time is not None
