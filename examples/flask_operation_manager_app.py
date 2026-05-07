@@ -166,6 +166,8 @@ class MyExampleAgent:
                         "get_operation_manager_state": "/operation_manager/state",
                         "start": "/operation_manager/start",
                         "stop": "/operation_manager/stop",
+                        "pause": "/operation_manager/pause",
+                        "resume": "/operation_manager/resume",
                     }
                 ),
                 200,

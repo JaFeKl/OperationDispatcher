@@ -194,6 +194,36 @@ class OperationManagerOpenAPI:
             "state": state,
         }, 200
 
+    def pause_operation_manager_response(self) -> tuple[dict[str, Any], int]:
+        if self._operation_manager.is_paused:
+            state, _ = self.get_operation_manager_state_response()
+            return {
+                "message": "operation manager is already paused",
+                "state": state,
+            }, 200
+
+        self._operation_manager.pause()
+        state, _ = self.get_operation_manager_state_response()
+        return {
+            "message": "operation manager paused",
+            "state": state,
+        }, 200
+
+    def resume_operation_manager_response(self) -> tuple[dict[str, Any], int]:
+        if not self._operation_manager.is_paused:
+            state, _ = self.get_operation_manager_state_response()
+            return {
+                "message": "operation manager is not paused",
+                "state": state,
+            }, 200
+
+        self._operation_manager.resume()
+        state, _ = self.get_operation_manager_state_response()
+        return {
+            "message": "operation manager resumed",
+            "state": state,
+        }, 200
+
     def register_default_endpoints(self, app: Any) -> None:
         self.register_get_schedule_endpoint(app)
         self.register_get_schedule_history_endpoint(app)
@@ -204,6 +234,8 @@ class OperationManagerOpenAPI:
         self.register_get_operation_manager_state_endpoint(app)
         self.register_start_operation_manager_endpoint(app)
         self.register_stop_operation_manager_endpoint(app)
+        self.register_pause_operation_manager_endpoint(app)
+        self.register_resume_operation_manager_endpoint(app)
 
     def register_get_schedule_endpoint(
         self,
@@ -341,6 +373,34 @@ class OperationManagerOpenAPI:
         @swag_from(openapi_spec)
         def stop_operation_manager_endpoint() -> tuple[Any, int]:
             payload, status_code = self.stop_operation_manager_response()
+            return jsonify(payload), status_code
+
+    def register_pause_operation_manager_endpoint(
+        self,
+        app: Any,
+        route: str = "/operation_manager/pause",
+        endpoint_name: str = "pause",
+    ) -> None:
+        openapi_spec = self.pause_operation_manager_openapi_spec()
+
+        @app.post(route, endpoint=endpoint_name)
+        @swag_from(openapi_spec)
+        def pause_operation_manager_endpoint() -> tuple[Any, int]:
+            payload, status_code = self.pause_operation_manager_response()
+            return jsonify(payload), status_code
+
+    def register_resume_operation_manager_endpoint(
+        self,
+        app: Any,
+        route: str = "/operation_manager/resume",
+        endpoint_name: str = "resume",
+    ) -> None:
+        openapi_spec = self.resume_operation_manager_openapi_spec()
+
+        @app.post(route, endpoint=endpoint_name)
+        @swag_from(openapi_spec)
+        def resume_operation_manager_endpoint() -> tuple[Any, int]:
+            payload, status_code = self.resume_operation_manager_response()
             return jsonify(payload), status_code
 
     @staticmethod
@@ -514,6 +574,36 @@ class OperationManagerOpenAPI:
             "responses": {
                 200: {
                     "description": "Operation manager stop request result.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                }
+            },
+        }
+
+    @staticmethod
+    def pause_operation_manager_openapi_spec() -> dict[str, Any]:
+        return {
+            "tags": ["Operation Manager Runtime"],
+            "produces": ["application/json"],
+            "responses": {
+                200: {
+                    "description": "Operation manager pause request result.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                }
+            },
+        }
+
+    @staticmethod
+    def resume_operation_manager_openapi_spec() -> dict[str, Any]:
+        return {
+            "tags": ["Operation Manager Runtime"],
+            "produces": ["application/json"],
+            "responses": {
+                200: {
+                    "description": "Operation manager resume request result.",
                     "schema": {
                         "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
                     },

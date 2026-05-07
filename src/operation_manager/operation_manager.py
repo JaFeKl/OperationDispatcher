@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import cast
-from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from typing import cast
 from typing import Any
 from uuid import UUID
 import logging
@@ -33,16 +33,30 @@ class OperationManager:
         agent_id: str,
         on_event_callback: Callable[[OperationManagerEvent], object] | None = None,
         poll_interval_seconds: float = 0.1,
+        start_request_max_retries: int = 5,
+        start_request_retry_cooldown_seconds: float = 1.0,
         payload_model: Any | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be greater than 0")
+        if start_request_max_retries <= 0:
+            raise ValueError("start_request_max_retries must be greater than 0")
+        if start_request_retry_cooldown_seconds < 0:
+            raise ValueError(
+                "start_request_retry_cooldown_seconds must be non-negative"
+            )
 
         self._logger = logger
         self._schedule = Schedule(agent_id=agent_id)
         self._on_event_callback = on_event_callback
         self._payload_model = payload_model
+        self._start_request_max_retries = start_request_max_retries
+        self._start_request_retry_cooldown_seconds = (
+            start_request_retry_cooldown_seconds
+        )
+        self._start_request_denial_counts: dict[UUID, int] = {}
+        self._start_request_cooldown_until: dict[UUID, datetime] = {}
         self._current_operation: Operation | None = None
         self._is_paused = False
         self._is_running = False
@@ -106,6 +120,7 @@ class OperationManager:
         self._emit_event(OperationManagerEventType.OPERATION_MANAGER_PAUSED)
 
     def resume(self) -> None:
+        self._clear_all_start_request_retry_state()
         self._is_paused = False
         if self._current_operation is not None:
             self._emit_event(
@@ -145,8 +160,14 @@ class OperationManager:
             if next_operation.time_window.start > now:
                 return None
 
-        if not await self._request_operation_start(next_operation):
+        if self._is_start_request_cooldown_active(next_operation):
             return None
+
+        if not await self._request_operation_start(next_operation):
+            self._on_start_request_denied(next_operation)
+            return None
+
+        self._clear_start_request_retry_state(next_operation.id)
 
         if not await self._request_operation_start_dispatch(next_operation):
             return None
@@ -250,6 +271,7 @@ class OperationManager:
             operation.termination_reason = TerminationReason.CANCELLED_DURING_RUN
             self._schedule.complete(operation)
             self._current_operation = None
+            self._clear_start_request_retry_state(operation.id)
             self._emit_event(
                 OperationManagerEventType.OPERATION_CANCELLED,
                 operation=operation,
@@ -265,6 +287,7 @@ class OperationManager:
 
         operation = self._schedule.cancel(operation_id)
         if operation is not None:
+            self._clear_start_request_retry_state(operation.id)
             self._emit_event(
                 OperationManagerEventType.OPERATION_CANCELLED,
                 operation=operation,
@@ -304,6 +327,49 @@ class OperationManager:
                 return operation
         return None
 
+    def _on_start_request_denied(self, operation: Operation) -> None:
+        denial_count = self._start_request_denial_counts.get(operation.id, 0) + 1
+        self._start_request_denial_counts[operation.id] = denial_count
+        max_retries_reached = denial_count >= self._start_request_max_retries
+
+        if self._start_request_retry_cooldown_seconds > 0:
+            self._start_request_cooldown_until[operation.id] = datetime.now(
+                timezone.utc
+            ) + timedelta(seconds=self._start_request_retry_cooldown_seconds)
+
+        self._emit_event(
+            OperationManagerEventType.OPERATION_START_DENIED,
+            operation=operation,
+            data={
+                "retry_count": denial_count,
+                "max_retries": self._start_request_max_retries,
+                "cooldown_seconds": self._start_request_retry_cooldown_seconds,
+            },
+        )
+
+        if max_retries_reached:
+            self.pause()
+
+    def _is_start_request_cooldown_active(self, operation: Operation) -> bool:
+        cooldown_until = self._start_request_cooldown_until.get(operation.id)
+        if cooldown_until is None:
+            return False
+
+        now = datetime.now(timezone.utc)
+        if cooldown_until > now:
+            return True
+
+        self._start_request_cooldown_until.pop(operation.id, None)
+        return False
+
+    def _clear_start_request_retry_state(self, operation_id: UUID) -> None:
+        self._start_request_denial_counts.pop(operation_id, None)
+        self._start_request_cooldown_until.pop(operation_id, None)
+
+    def _clear_all_start_request_retry_state(self) -> None:
+        self._start_request_denial_counts.clear()
+        self._start_request_cooldown_until.clear()
+
     async def _request_operation_start(self, operation: Operation) -> bool:
         return await self._request_operation_event(
             operation,
@@ -332,14 +398,13 @@ class OperationManager:
         if len(self._event_history) > self._event_history_limit:
             self._event_history = self._event_history[-self._event_history_limit :]
 
-        is_allowed = True
+        is_allowed = self._on_event_callback is None
         if self._on_event_callback is not None:
             try:
                 callback_result = self._on_event_callback(event)
                 if inspect.isawaitable(callback_result):
                     callback_result = await _as_awaitable(callback_result)
-                if isinstance(callback_result, bool):
-                    is_allowed = callback_result
+                is_allowed = callback_result is True
             except Exception:
                 is_allowed = False
 
@@ -397,14 +462,25 @@ class OperationManager:
         if next_operation is None:
             return None
 
-        if next_operation.time_window is None:
-            return 0.0
-
         now = datetime.now(timezone.utc)
-        wait_seconds = (next_operation.time_window.start - now).total_seconds()
-        if wait_seconds < 0:
-            return 0.0
-        return wait_seconds
+
+        time_window_wait_seconds = 0.0
+        if next_operation.time_window is not None:
+            time_window_wait_seconds = (
+                next_operation.time_window.start - now
+            ).total_seconds()
+            if time_window_wait_seconds < 0:
+                time_window_wait_seconds = 0.0
+
+        cooldown_wait_seconds = 0.0
+        cooldown_until = self._start_request_cooldown_until.get(next_operation.id)
+        if cooldown_until is not None:
+            cooldown_wait_seconds = (cooldown_until - now).total_seconds()
+            if cooldown_wait_seconds <= 0:
+                self._start_request_cooldown_until.pop(next_operation.id, None)
+                cooldown_wait_seconds = 0.0
+
+        return max(time_window_wait_seconds, cooldown_wait_seconds)
 
     def _emit_event(
         self,
@@ -441,9 +517,20 @@ class OperationManager:
             except Exception:
                 pass
         if self._logger is not None:
-            self._logger.debug(
-                f"EVENT {event.event_type} for operation {event.operation_name} ({event.operation_id})"
-            )
+            if event.event_type in {
+                OperationManagerEventType.OPERATION_MANAGER_PAUSED,
+                OperationManagerEventType.OPERATION_MANAGER_STOPPED,
+            }:
+                self._logger.warning(f"EVENT {event.event_type}")
+            elif event.event_type in {
+                OperationManagerEventType.OPERATION_MANAGER_RESUMED,
+            }:
+                self._logger.info(f"EVENT {event.event_type}")
+
+            else:
+                self._logger.debug(
+                    f"EVENT {event.event_type} for operation {event.operation_name} ({event.operation_id})"
+                )
 
         self._notify_wakeup()
         return event

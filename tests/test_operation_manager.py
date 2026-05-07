@@ -456,6 +456,155 @@ def test_scheduler_run_once_emits_start_requested_event() -> None:
     assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED in seen_event_types
 
 
+def test_scheduler_does_not_continue_when_start_request_callback_returns_none() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> bool | None:
+        seen_event_types.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
+            return True
+        return None
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    executed = asyncio.run(scheduler.run_once())
+
+    assert executed is None
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert scheduler.current_operation is None
+    assert seen_event_types == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DENIED,
+    ]
+
+
+def test_scheduler_retries_denied_start_after_cooldown() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+    start_request_calls = 0
+
+    def on_event_callback(event) -> bool | None:
+        nonlocal start_request_calls
+        seen_event_types.append(event.event_type)
+
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            start_request_calls += 1
+            return start_request_calls >= 2
+
+        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
+            return True
+
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=on_event_callback,
+        start_request_retry_cooldown_seconds=0.02,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    async def run_attempts() -> Operation | None:
+        first = await scheduler.run_once()
+        second = await scheduler.run_once()
+        await asyncio.sleep(0.03)
+        third = await scheduler.run_once()
+
+        assert first is None
+        assert second is None
+        return third
+
+    executed = asyncio.run(run_attempts())
+
+    assert executed is operation
+    assert start_request_calls == 2
+    assert seen_event_types == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DENIED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+        SchedulerEventType.OPERATION_STARTED,
+    ]
+
+
+def test_scheduler_pauses_when_denied_start_reaches_max_retries() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> bool | None:
+        seen_event_types.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            return False
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=on_event_callback,
+        start_request_max_retries=2,
+        start_request_retry_cooldown_seconds=0.0,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    first = asyncio.run(scheduler.run_once())
+    second = asyncio.run(scheduler.run_once())
+
+    assert first is None
+    assert second is None
+    assert scheduler.is_paused is True
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert scheduler.current_operation is None
+    assert seen_event_types == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DENIED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DENIED,
+        SchedulerEventType.OPERATION_MANAGER_PAUSED,
+    ]
+
+
+def test_scheduler_resume_resets_denied_start_retry_counter() -> None:
+    start_request_calls = 0
+
+    def on_event_callback(event) -> bool | None:
+        nonlocal start_request_calls
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            start_request_calls += 1
+            return False
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=on_event_callback,
+        start_request_max_retries=2,
+        start_request_retry_cooldown_seconds=0.0,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    asyncio.run(scheduler.run_once())
+    asyncio.run(scheduler.run_once())
+    assert scheduler.is_paused is True
+
+    scheduler.resume()
+    assert scheduler.is_paused is False
+
+    third_attempt = asyncio.run(scheduler.run_once())
+
+    assert third_attempt is None
+    assert scheduler.is_paused is False
+    assert start_request_calls == 3
+
+    fourth_attempt = asyncio.run(scheduler.run_once())
+
+    assert fourth_attempt is None
+    assert scheduler.is_paused is True
+    assert start_request_calls == 4
+
+
 def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
     seen_event_types: list[SchedulerEventType] = []
 

@@ -95,6 +95,8 @@ async def main() -> None:
 		agent_id="agent-1",
 		on_event_callback=on_event,
 		poll_interval_seconds=0.1,
+		start_request_max_retries=3,
+		start_request_retry_cooldown_seconds=1.0,
 	)
 
 	operation_manager.add(Operation(name="collect_metrics", agent_id="agent-1", priority=10))
@@ -144,7 +146,10 @@ operation_manager_api.register_default_endpoints(app)
 
 `OperationManager.run_once()` emits `OPERATION_START_REQUESTED` as a handshake before an operation can start.
 Then it emits `OPERATION_START_DISPATCH_REQUESTED` so the higher-level system can trigger the actual start.
-If `on_event_callback` returns `False` for either event, the operation stays queued.
+If `on_event_callback` is configured, it must return explicit `True` for both events,
+otherwise the operation stays queued.
+When `start_request_retry_cooldown_seconds` is configured, denied start requests are retried after the cooldown.
+When `start_request_max_retries` is reached for an operation, the manager auto-pauses.
 
 When a `payload_model` is configured, `AddOperationRequest.payload` and `ScheduledOperation.payload`
 are represented as a real OpenAPI model reference (`$ref`) in `definitions`.
@@ -160,6 +165,8 @@ are represented as a real OpenAPI model reference (`$ref`) in `definitions`.
 - `GET /operation_manager/state`
 - `POST /operation_manager/start`
 - `POST /operation_manager/stop`
+- `POST /operation_manager/pause`
+- `POST /operation_manager/resume`
 
 ## Included example app
 

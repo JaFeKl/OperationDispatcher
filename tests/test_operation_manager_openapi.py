@@ -204,6 +204,12 @@ def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() 
     stop_response = client.post("/operation_manager/stop")
     assert stop_response.status_code == 200
 
+    pause_response = client.post("/operation_manager/pause")
+    assert pause_response.status_code == 200
+
+    resume_response = client.post("/operation_manager/resume")
+    assert resume_response.status_code == 200
+
 
 def test_scheduler_openapi_add_operation_requires_payload() -> None:
     scheduler = Scheduler(agent_id="agent-a")
@@ -308,6 +314,14 @@ def test_scheduler_openapi_runtime_start_stop_and_state() -> None:
     assert "is_running" in state_payload
     assert "queue_size" in state_payload
     assert "runtime_thread_alive" in state_payload
+
+    pause_payload, pause_status = scheduler_api.pause_operation_manager_response()
+    assert pause_status == 200
+    assert pause_payload["state"]["is_paused"] is True
+
+    resume_payload, resume_status = scheduler_api.resume_operation_manager_response()
+    assert resume_status == 200
+    assert resume_payload["state"]["is_paused"] is False
 
     stop_payload, stop_status = scheduler_api.stop_operation_manager_response()
     assert stop_status == 200

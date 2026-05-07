@@ -40,6 +40,7 @@ class OperationManagerEventType(str, Enum):
     OPERATION_STOP_REQUESTED = "operation_stop_requested"
     OPERATION_RESUME_REQUESTED = "operation_resume_requested"
     OPERATION_START_REQUESTED = "operation_start_requested"
+    OPERATION_START_DENIED = "operation_start_denied"
     OPERATION_START_DISPATCH_REQUESTED = "operation_start_dispatch_requested"
     OPERATION_STARTED = "operation_started"
     OPERATION_COMPLETED = "operation_completed"
