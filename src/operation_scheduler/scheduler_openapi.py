@@ -18,18 +18,15 @@ class SchedulerOpenAPI:
     def __init__(
         self,
         scheduler: Scheduler,
-        agent_id: str | None = None,
         default_operation_name: str = "operation",
-        payload_model: Any | None = None,
     ) -> None:
         self._scheduler = scheduler
-        self._agent_id = (
-            agent_id if agent_id is not None else scheduler.schedule.agent_id
-        )
+        resolved_agent_id = scheduler.schedule.agent_id
+        if resolved_agent_id is None:
+            raise ValueError("scheduler.schedule.agent_id must be set")
+        self._agent_id = resolved_agent_id
         self._default_operation_name = default_operation_name
-        self._payload_model = (
-            payload_model if payload_model is not None else scheduler.payload_model
-        )
+        self._payload_model = scheduler.payload_model
         self._payload_adapter: TypeAdapter[Any] | None = (
             TypeAdapter(self._payload_model)
             if self._payload_model is not None
@@ -95,12 +92,8 @@ class SchedulerOpenAPI:
         except (ValidationError, TypeError, ValueError) as error:
             return {"error": str(error)}, 400
 
-        resolved_agent_id = self._resolved_agent_id()
-        if resolved_agent_id is None:
-            return {"error": "agent_id is not configured for SchedulerOpenAPI"}, 400
-
         normalized_payload = normalized_operation_payload
-        normalized_payload["agent_id"] = resolved_agent_id
+        normalized_payload["agent_id"] = self._resolved_agent_id()
         normalized_payload.setdefault("name", self._default_operation_name)
 
         try:
@@ -124,12 +117,13 @@ class SchedulerOpenAPI:
             return {"error": str(error)}, 400
 
         operation = self._scheduler.cancel(parsed_operation_id)
+
         if operation is None:
             return {"error": "operation not found"}, 404
         return operation.model_dump(mode="json"), 200
 
     def get_scheduler_state_response(self) -> tuple[dict[str, Any], int]:
-        scheduler_state = self._scheduler.get_state()
+        scheduler_state = self._scheduler.get_state().model_dump(mode="json")
         scheduler_state["runtime_thread_alive"] = (
             self._runtime_thread.is_alive()
             if self._runtime_thread is not None
@@ -579,14 +573,26 @@ class SchedulerOpenAPI:
                     "agent_id": {"type": "string", "example": "agent-1"},
                     "payload": self._payload_openapi_schema,
                     "priority": {"type": "integer", "example": 10},
-                    "runtime_status": {
+                    "lifecycle_status": {
                         "type": "string",
-                        "enum": ["pending", "running", "finished"],
-                        "example": "pending",
+                        "enum": ["queued", "ready", "running", "finished"],
+                        "example": "queued",
                     },
-                    "result_status": {
+                    "execution_outcome": {
                         "type": "string",
-                        "enum": ["none", "succeeded", "failed", "cancelled", "stopped"],
+                        "enum": ["none", "succeeded", "failed"],
+                        "example": "none",
+                    },
+                    "termination_reason": {
+                        "type": "string",
+                        "enum": [
+                            "none",
+                            "cancelled_before_start",
+                            "cancelled_during_run",
+                            "stopped",
+                            "timeout",
+                            "dependency_failed",
+                        ],
                         "example": "none",
                     },
                     "created_at": {
@@ -616,8 +622,9 @@ class SchedulerOpenAPI:
                     "agent_id",
                     "payload",
                     "priority",
-                    "runtime_status",
-                    "result_status",
+                    "lifecycle_status",
+                    "execution_outcome",
+                    "termination_reason",
                     "created_at",
                     "start_time",
                     "finish_time",
@@ -696,7 +703,7 @@ class SchedulerOpenAPI:
     def _operation_from_payload(operation_payload: dict[str, Any]) -> Operation:
         return Operation.model_validate(operation_payload)
 
-    def _resolved_agent_id(self) -> str | None:
+    def _resolved_agent_id(self) -> str:
         return self._agent_id
 
     def _normalize_payload(self, payload: Any) -> dict[str, Any]:

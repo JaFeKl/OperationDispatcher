@@ -35,7 +35,7 @@ A `Schedule` is a priority queue with history tracking.
 - **All operations** use `Operation`.
 - Optional scheduling windows are expressed via `time_window` (`TimeWindow(start, end)`).
 
-All operations share runtime fields like `runtime_status`, `result_status`, `start_time`, and `finish_time`.
+All operations share status fields like `lifecycle_status`, `execution_outcome`, `termination_reason`, plus execution timestamps (`start_time`, `finish_time`).
 
 ### Queue behavior
 
@@ -74,17 +74,26 @@ Use `Scheduler` when operations should execute automatically in an async loop.
 
 ```python
 import asyncio
-from operation_scheduler import Operation, Scheduler
+from operation_scheduler import Operation, Scheduler, SchedulerEventType
 
 
-async def execute_operation(operation: Operation) -> None:
-	print(f"Executing {operation.name} ({operation.id})")
-	await asyncio.sleep(1)
+def on_event(event):
+	if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+		# higher-level admission control
+		return True
+
+	if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
+		print(f"Dispatch operation {event.operation_name} ({event.operation_id})")
+		return True
+
+	if event.event_type is SchedulerEventType.OPERATION_CANCELLED:
+		print(f"Cancel operation {event.operation_name} ({event.operation_id})")
 
 
 async def main() -> None:
 	scheduler = Scheduler(
-		operation_executor=execute_operation,
+		agent_id="agent-1",
+		on_event_callback=on_event,
 		poll_interval_seconds=0.1,
 	)
 
@@ -120,12 +129,8 @@ class OperationPayloadModel(BaseModel):
 
 app = Flask(__name__)
 
-scheduler = Scheduler(payload_model=OperationPayloadModel)
-scheduler_api = SchedulerOpenAPI(
-	scheduler,
-	agent_id="agent-1",
-	payload_model=OperationPayloadModel,
-)
+scheduler = Scheduler(agent_id="agent-1", payload_model=OperationPayloadModel)
+scheduler_api = SchedulerOpenAPI(scheduler)
 
 swagger_template = {
 	"swagger": "2.0",
@@ -136,6 +141,10 @@ Swagger(app, template=swagger_template)
 
 scheduler_api.register_default_endpoints(app)
 ```
+
+`Scheduler.run_once()` emits `OPERATION_START_REQUESTED` as a handshake before an operation can start.
+Then it emits `OPERATION_START_DISPATCH_REQUESTED` so the higher-level system can trigger the actual start.
+If `on_event_callback` returns `False` for either event, the operation stays queued.
 
 When a `payload_model` is configured, `AddOperationRequest.payload` and `ScheduledOperation.payload`
 are represented as a real OpenAPI model reference (`$ref`) in `definitions`.

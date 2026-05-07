@@ -16,7 +16,7 @@ class ExamplePayloadTypedDict(TypedDict):
 
 
 def test_scheduler_openapi_get_schedule_response_returns_json_payload() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler_api = SchedulerOpenAPI(scheduler)
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
@@ -26,7 +26,7 @@ def test_scheduler_openapi_get_schedule_response_returns_json_payload() -> None:
     assert status_code == 200
     assert len(payload) == 1
     assert payload[0]["id"] == str(operation.id)
-    assert payload[0]["runtime_status"] == "pending"
+    assert payload[0]["lifecycle_status"] == "queued"
 
 
 def test_scheduler_openapi_get_schedule_spec_uses_scheduled_operation() -> None:
@@ -40,7 +40,7 @@ def test_scheduler_openapi_get_schedule_spec_uses_scheduled_operation() -> None:
 
 
 def test_scheduler_openapi_definitions_contains_required_models() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler_api = SchedulerOpenAPI(scheduler)
     definitions = scheduler_api.get_openapi_definitions()
 
@@ -53,8 +53,8 @@ def test_scheduler_openapi_definitions_contains_required_models() -> None:
 
 
 def test_scheduler_openapi_add_operation_supports_time_window() -> None:
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     added_payload, add_status = scheduler_api.add_operation_response(
         {
@@ -71,8 +71,8 @@ def test_scheduler_openapi_add_operation_supports_time_window() -> None:
 
 
 def test_scheduler_openapi_add_operation_returns_400_on_queue_type_mismatch() -> None:
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     first_payload, first_status = scheduler_api.add_operation_response(
         {
@@ -101,7 +101,7 @@ def test_scheduler_openapi_register_get_schedule_endpoint_registers_route() -> N
     pytest.importorskip("flasgger")
     from flask import Flask
 
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler_api = SchedulerOpenAPI(scheduler)
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
@@ -119,7 +119,7 @@ def test_scheduler_openapi_register_get_schedule_endpoint_registers_route() -> N
 
 
 def test_scheduler_openapi_get_current_and_next_operation_responses() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler_api = SchedulerOpenAPI(scheduler)
     operation = Operation(name="sync", agent_id="agent-a")
 
@@ -132,15 +132,15 @@ def test_scheduler_openapi_get_current_and_next_operation_responses() -> None:
     assert next_status == 200
     assert next_payload["id"] == str(operation.id)
 
-    scheduler.start_next()
+    scheduler._start_next()
     current_payload, current_status = scheduler_api.get_current_operation_response()
     assert current_status == 200
     assert current_payload["id"] == str(operation.id)
 
 
 def test_scheduler_openapi_add_and_cancel_operation_responses() -> None:
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     added_payload, add_status = scheduler_api.add_operation_response(
         {
@@ -156,7 +156,8 @@ def test_scheduler_openapi_add_and_cancel_operation_responses() -> None:
         added_payload["id"]
     )
     assert cancel_status == 200
-    assert cancelled_payload["result_status"] == "cancelled"
+    assert cancelled_payload["execution_outcome"] == "none"
+    assert cancelled_payload["termination_reason"] == "cancelled_before_start"
 
 
 def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() -> None:
@@ -164,8 +165,8 @@ def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() 
     pytest.importorskip("flasgger")
     from flask import Flask
 
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -198,8 +199,8 @@ def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() 
 
 
 def test_scheduler_openapi_add_operation_requires_payload() -> None:
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     response, status_code = scheduler_api.add_operation_response({"name": "sync"})
 
@@ -208,19 +209,19 @@ def test_scheduler_openapi_add_operation_requires_payload() -> None:
 
 
 def test_scheduler_openapi_add_operation_requires_configured_agent_id() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler_api = SchedulerOpenAPI(scheduler)
 
     response, status_code = scheduler_api.add_operation_response(
         {"payload": {"task": "x"}}
     )
 
-    assert status_code == 400
-    assert "agent_id is not configured" in response["error"]
+    assert status_code == 201
+    assert response["agent_id"] == "agent-a"
 
 
 def test_scheduler_openapi_add_operation_schema_requires_payload_only() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler_api = SchedulerOpenAPI(scheduler)
     definitions = scheduler_api.get_openapi_definitions()
 
@@ -228,8 +229,8 @@ def test_scheduler_openapi_add_operation_schema_requires_payload_only() -> None:
 
 
 def test_scheduler_openapi_validates_payload_with_pydantic_model() -> None:
-    scheduler = Scheduler(payload_model=ExamplePayloadModel)
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a", payload_model=ExamplePayloadModel)
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     valid_payload, valid_status = scheduler_api.add_operation_response(
         {"payload": {"task": "collect_metrics", "retries": 2}}
@@ -245,8 +246,8 @@ def test_scheduler_openapi_validates_payload_with_pydantic_model() -> None:
 
 
 def test_scheduler_openapi_exposes_pydantic_payload_as_definition() -> None:
-    scheduler = Scheduler(payload_model=ExamplePayloadModel)
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a", payload_model=ExamplePayloadModel)
+    scheduler_api = SchedulerOpenAPI(scheduler)
     definitions = scheduler_api.get_openapi_definitions()
 
     assert "ExamplePayloadModel" in definitions
@@ -257,8 +258,8 @@ def test_scheduler_openapi_exposes_pydantic_payload_as_definition() -> None:
 
 
 def test_scheduler_openapi_validates_payload_with_typed_dict_model() -> None:
-    scheduler = Scheduler(payload_model=ExamplePayloadTypedDict)
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a", payload_model=ExamplePayloadTypedDict)
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     valid_payload, valid_status = scheduler_api.add_operation_response(
         {"payload": {"task": "inspect", "priority": 5}}
@@ -274,8 +275,8 @@ def test_scheduler_openapi_validates_payload_with_typed_dict_model() -> None:
 
 
 def test_scheduler_openapi_exposes_typed_dict_payload_as_definition() -> None:
-    scheduler = Scheduler(payload_model=ExamplePayloadTypedDict)
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a", payload_model=ExamplePayloadTypedDict)
+    scheduler_api = SchedulerOpenAPI(scheduler)
     definitions = scheduler_api.get_openapi_definitions()
 
     assert "ExamplePayloadTypedDict" in definitions
@@ -286,8 +287,8 @@ def test_scheduler_openapi_exposes_typed_dict_payload_as_definition() -> None:
 
 
 def test_scheduler_openapi_runtime_start_stop_and_state() -> None:
-    scheduler = Scheduler(poll_interval_seconds=0.01)
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a", poll_interval_seconds=0.01)
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     start_payload, start_status = scheduler_api.start_scheduler_response()
     assert start_status == 200
@@ -311,8 +312,8 @@ def test_scheduler_openapi_runtime_start_stop_and_state() -> None:
 def test_scheduler_openapi_history_response_uses_limit_and_returns_newest_first() -> (
     None
 ):
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     first_payload, _ = scheduler_api.add_operation_response({"payload": {"step": 1}})
     second_payload, _ = scheduler_api.add_operation_response({"payload": {"step": 2}})
@@ -320,11 +321,11 @@ def test_scheduler_openapi_history_response_uses_limit_and_returns_newest_first(
     first_id = first_payload["id"]
     second_id = second_payload["id"]
 
-    pulled_first = scheduler.start_next()
+    pulled_first = scheduler._start_next()
     assert pulled_first is not None
     scheduler.complete_current()
 
-    pulled_second = scheduler.start_next()
+    pulled_second = scheduler._start_next()
     assert pulled_second is not None
     scheduler.complete_current()
 
@@ -341,8 +342,8 @@ def test_scheduler_openapi_history_endpoint_rejects_invalid_limit_query() -> Non
     pytest.importorskip("flasgger")
     from flask import Flask
 
-    scheduler = Scheduler()
-    scheduler_api = SchedulerOpenAPI(scheduler, agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
 
     app = Flask(__name__)
     scheduler_api.register_get_schedule_history_endpoint(app)

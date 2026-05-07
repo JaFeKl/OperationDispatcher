@@ -4,27 +4,31 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from operation_scheduler import (
+    ExecutionOutcome,
+    LifecycleStatus,
     Operation,
-    ResultStatus,
-    RuntimeStatus,
     Schedule,
     Scheduler,
+    SchedulerEventType,
+    SchedulerState,
+    TerminationReason,
     TimeWindow,
 )
 
 
 def test_scheduler_starts_and_completes_next_operation() -> None:
-    schedule = Schedule()
-    scheduler = Scheduler(schedule=schedule)
+    schedule = Schedule(agent_id="agent-a")
+    scheduler = Scheduler(agent_id="agent-a", schedule=schedule)
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
-    current = scheduler.start_next()
+    current = scheduler._start_next()
 
     assert current is operation
     assert scheduler.current_operation is operation
-    assert operation.runtime_status is RuntimeStatus.RUNNING
-    assert operation.result_status is ResultStatus.NONE
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
 
     completed = scheduler.complete_current()
     assert completed is operation
@@ -33,56 +37,107 @@ def test_scheduler_starts_and_completes_next_operation() -> None:
 
 
 def test_scheduler_run_once_executes_and_completes_operation() -> None:
-    scheduler = Scheduler()
+    seen_event_types: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> bool | None:
+        seen_event_types.append(event.event_type)
+        return True
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=on_event_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
     executed = asyncio.run(scheduler.run_once())
 
     assert executed is operation
-    assert scheduler.current_operation is None
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.SUCCEEDED
-    assert scheduler.schedule.completed_operations == [operation]
+    assert seen_event_types == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+        SchedulerEventType.OPERATION_STARTED,
+    ]
+    assert scheduler.current_operation is operation
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
+    assert scheduler.schedule.completed_operations == []
 
 
 def test_scheduler_pause_blocks_start_until_resumed() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
     scheduler.pause()
-    assert scheduler.start_next() is None
+    assert scheduler._start_next() is None
 
     scheduler.resume()
-    assert scheduler.start_next() is operation
+    assert scheduler._start_next() is operation
 
 
 def test_scheduler_cancels_pending_operation() -> None:
-    scheduler = Scheduler()
+    seen_events: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> None:
+        seen_events.append(event.event_type)
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
     cancelled = scheduler.cancel(operation.id)
 
     assert cancelled is operation
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.CANCELLED
+    assert operation.lifecycle_status is LifecycleStatus.FINISHED
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.CANCELLED_BEFORE_START
     assert scheduler.schedule.next() is None
+    assert seen_events == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_CANCEL_REQUESTED,
+        SchedulerEventType.OPERATION_CANCELLED,
+    ]
 
 
-def test_scheduler_cancel_stops_current_operation() -> None:
-    scheduler = Scheduler()
+def test_scheduler_cancel_marks_current_operation_as_cancelled_during_run() -> None:
+    seen_events: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> None:
+        seen_events.append(event.event_type)
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
-    scheduler.start_next()
+    scheduler._start_next()
 
     cancelled = scheduler.cancel(operation.id)
 
     assert cancelled is operation
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.STOPPED
+    assert operation.lifecycle_status is LifecycleStatus.FINISHED
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.CANCELLED_DURING_RUN
     assert scheduler.current_operation is None
+    assert seen_events == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_STARTED,
+        SchedulerEventType.OPERATION_CANCEL_REQUESTED,
+        SchedulerEventType.OPERATION_CANCELLED,
+    ]
+
+
+def test_scheduler_cancelled_running_operation_is_archived_in_history() -> None:
+    scheduler = Scheduler(agent_id="agent-a")
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    scheduler.cancel(operation.id)
+
+    assert scheduler.schedule.completed_operations == [operation]
+    assert scheduler.schedule.history(limit=1) == [operation]
 
 
 def test_scheduler_fail_current_sets_finish_time() -> None:
@@ -95,31 +150,38 @@ def test_scheduler_fail_current_sets_finish_time() -> None:
             end=now + timedelta(minutes=10),
         ),
     )
-    scheduler = Scheduler(schedule=Schedule())
+    scheduler = Scheduler(agent_id="agent-a", schedule=Schedule(agent_id="agent-a"))
     scheduler.add(operation)
-    scheduler.start_next()
+    scheduler._start_next()
 
     failed = scheduler.fail_current()
 
     assert failed is operation
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.FAILED
+    assert operation.lifecycle_status is LifecycleStatus.FINISHED
+    assert operation.execution_outcome is ExecutionOutcome.FAILED
+    assert operation.termination_reason is TerminationReason.NONE
     assert operation.finish_time is not None
 
 
 def test_scheduler_marks_failed_if_executor_raises() -> None:
-    def broken_executor(operation: Operation) -> None:
-        raise RuntimeError("boom")
+    def deny_start(event) -> bool | None:
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            return False
+        return None
 
-    scheduler = Scheduler(operation_executor=broken_executor)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=deny_start,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
-    with pytest.raises(RuntimeError):
-        asyncio.run(scheduler.run_once())
+    executed = asyncio.run(scheduler.run_once())
 
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.FAILED
+    assert executed is None
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
     assert scheduler.current_operation is None
 
 
@@ -133,56 +195,78 @@ def test_scheduler_run_once_waits_for_windowed_operation_due_time() -> None:
             end=now + timedelta(minutes=10),
         ),
     )
-    scheduler = Scheduler(schedule=Schedule())
+    scheduler = Scheduler(agent_id="agent-a", schedule=Schedule(agent_id="agent-a"))
     scheduler.add(operation)
 
     executed = asyncio.run(scheduler.run_once())
 
     assert executed is None
-    assert operation.runtime_status is RuntimeStatus.PENDING
-    assert operation.result_status is ResultStatus.NONE
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
     assert scheduler.current_operation is None
 
 
 def test_scheduler_run_once_supports_async_executor() -> None:
-    called_with: list[Operation] = []
-
-    async def async_executor(operation: Operation) -> None:
+    async def on_event_callback(event) -> bool | None:
         await asyncio.sleep(0)
-        called_with.append(operation)
+        if event.event_type in {
+            SchedulerEventType.OPERATION_START_REQUESTED,
+            SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+        }:
+            return True
+        return None
 
-    scheduler = Scheduler(operation_executor=async_executor)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=on_event_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
     executed = asyncio.run(scheduler.run_once())
 
     assert executed is operation
-    assert called_with == [operation]
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.SUCCEEDED
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
 
 
 def test_scheduler_preserves_executor_set_result_status() -> None:
-    def status_setting_executor(operation: Operation) -> None:
-        operation.runtime_status = RuntimeStatus.FINISHED
-        operation.result_status = ResultStatus.FAILED
+    seen_start_request = False
 
-    scheduler = Scheduler(operation_executor=status_setting_executor)
+    def on_event_callback(event) -> bool | None:
+        nonlocal seen_start_request
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            seen_start_request = True
+            return True
+        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
+            return True
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_event_callback=on_event_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
     executed = asyncio.run(scheduler.run_once())
 
     assert executed is operation
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.FAILED
-    assert scheduler.current_operation is None
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
+    assert seen_start_request is True
+    assert scheduler.current_operation is operation
     assert scheduler.schedule.completed_operations == []
 
 
 def test_scheduler_run_loop_processes_operations_until_stopped() -> None:
-    scheduler = Scheduler(poll_interval_seconds=0.01)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        poll_interval_seconds=0.01,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -194,24 +278,203 @@ def test_scheduler_run_loop_processes_operations_until_stopped() -> None:
 
     asyncio.run(run_scheduler())
 
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.SUCCEEDED
-    assert scheduler.current_operation is None
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
+    assert scheduler.current_operation is operation
 
 
 def test_scheduler_get_state_reports_runtime_and_queue_information() -> None:
-    scheduler = Scheduler()
+    scheduler = Scheduler(agent_id="agent-a")
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
     initial_state = scheduler.get_state()
-    assert initial_state["is_running"] is False
-    assert initial_state["queue_size"] == 1
-    assert initial_state["current_operation"] is None
-    assert initial_state["running_since"] is None
-    assert initial_state["uptime_seconds"] is None
+    assert isinstance(initial_state, SchedulerState)
+    assert initial_state.is_running is False
+    assert initial_state.queue_size == 1
+    assert initial_state.current_operation is None
+    assert initial_state.running_since is None
+    assert initial_state.uptime_seconds is None
 
-    scheduler.start_next()
+    scheduler._start_next()
     running_state = scheduler.get_state()
-    assert running_state["current_operation"] is not None
-    assert running_state["current_operation"]["id"] == str(operation.id)
+    assert running_state.current_operation is not None
+    assert running_state.current_operation.id == operation.id
+
+
+def test_scheduler_emits_events_for_operation_lifecycle() -> None:
+    scheduler = Scheduler(agent_id="agent-a")
+    operation = Operation(name="sync", agent_id="agent-a")
+    seen_events: list[SchedulerEventType] = []
+
+    def on_event(event) -> None:
+        seen_events.append(event.event_type)
+
+    scheduler.add_event_listener(on_event)
+    scheduler.add(operation)
+    scheduler._start_next()
+    scheduler.complete_current()
+
+    assert seen_events == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_STARTED,
+        SchedulerEventType.OPERATION_COMPLETED,
+    ]
+
+
+def test_scheduler_run_loop_wakes_up_on_added_operation() -> None:
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        poll_interval_seconds=60.0,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+
+    async def run_scheduler() -> None:
+        task = asyncio.create_task(scheduler.run())
+        await asyncio.sleep(0.05)
+        scheduler.add(operation)
+        await asyncio.sleep(0.15)
+        scheduler.request_stop()
+        await task
+
+    asyncio.run(run_scheduler())
+
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
+
+
+def test_scheduler_records_scheduler_lifecycle_events() -> None:
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        poll_interval_seconds=0.01,
+    )
+
+    async def run_scheduler() -> None:
+        task = asyncio.create_task(scheduler.run())
+        await asyncio.sleep(0.05)
+        scheduler.request_stop()
+        await task
+
+    asyncio.run(run_scheduler())
+    event_types = [event.event_type for event in scheduler.get_event_history()]
+
+    assert SchedulerEventType.SCHEDULER_STARTED in event_types
+    assert SchedulerEventType.SCHEDULER_STOPPED in event_types
+
+
+def test_scheduler_stop_current_emits_stop_requested_before_stopped() -> None:
+    seen_events: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> None:
+        seen_events.append(event.event_type)
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    scheduler.stop_current()
+
+    assert seen_events == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_STARTED,
+        SchedulerEventType.OPERATION_STOP_REQUESTED,
+        SchedulerEventType.OPERATION_STOPPED,
+    ]
+
+
+def test_scheduler_resume_emits_operation_resume_requested_when_current_exists() -> (
+    None
+):
+    seen_events: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> None:
+        seen_events.append(event.event_type)
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    scheduler.pause()
+    scheduler.resume()
+
+    assert seen_events == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_STARTED,
+        SchedulerEventType.SCHEDULER_PAUSED,
+        SchedulerEventType.OPERATION_RESUME_REQUESTED,
+        SchedulerEventType.SCHEDULER_RESUMED,
+    ]
+
+
+def test_scheduler_calls_on_event_callback_for_emitted_events() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> None:
+        seen_event_types.append(event.event_type)
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    operation = Operation(name="sync", agent_id="agent-a")
+
+    scheduler.add(operation)
+    scheduler._start_next()
+    scheduler.complete_current()
+
+    assert seen_event_types == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_STARTED,
+        SchedulerEventType.OPERATION_COMPLETED,
+    ]
+
+
+def test_scheduler_run_once_emits_start_requested_event() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> bool | None:
+        seen_event_types.append(event.event_type)
+        if event.event_type in {
+            SchedulerEventType.OPERATION_START_REQUESTED,
+            SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+        }:
+            return True
+        return None
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    executed = asyncio.run(scheduler.run_once())
+
+    assert executed is operation
+    assert SchedulerEventType.OPERATION_START_REQUESTED in seen_event_types
+    assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED in seen_event_types
+
+
+def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+
+    def on_event_callback(event) -> bool | None:
+        seen_event_types.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            return True
+        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
+            return False
+        return None
+
+    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    executed = asyncio.run(scheduler.run_once())
+
+    assert executed is None
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert scheduler.current_operation is None
+    assert seen_event_types == [
+        SchedulerEventType.OPERATION_ADDED,
+        SchedulerEventType.OPERATION_START_REQUESTED,
+        SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+    ]

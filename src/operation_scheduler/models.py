@@ -8,18 +8,54 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
 
 
-class RuntimeStatus(str, Enum):
-    PENDING = "pending"
+class LifecycleStatus(str, Enum):
+    QUEUED = "queued"
+    READY = "ready"
     RUNNING = "running"
     FINISHED = "finished"
 
 
-class ResultStatus(str, Enum):
+class ExecutionOutcome(str, Enum):
     NONE = "none"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+
+
+class TerminationReason(str, Enum):
+    NONE = "none"
+    CANCELLED_BEFORE_START = "cancelled_before_start"
+    CANCELLED_DURING_RUN = "cancelled_during_run"
     STOPPED = "stopped"
+    TIMEOUT = "timeout"
+    DEPENDENCY_FAILED = "dependency_failed"
+
+
+class SchedulerEventType(str, Enum):
+    SCHEDULER_STARTED = "scheduler_started"
+    SCHEDULER_STOPPED = "scheduler_stopped"
+    SCHEDULER_PAUSED = "scheduler_paused"
+    SCHEDULER_RESUMED = "scheduler_resumed"
+    OPERATION_ADDED = "operation_added"
+    OPERATION_CANCEL_REQUESTED = "operation_cancel_requested"
+    OPERATION_STOP_REQUESTED = "operation_stop_requested"
+    OPERATION_RESUME_REQUESTED = "operation_resume_requested"
+    OPERATION_START_REQUESTED = "operation_start_requested"
+    OPERATION_START_DISPATCH_REQUESTED = "operation_start_dispatch_requested"
+    OPERATION_STARTED = "operation_started"
+    OPERATION_COMPLETED = "operation_completed"
+    OPERATION_FAILED = "operation_failed"
+    OPERATION_STOPPED = "operation_stopped"
+    OPERATION_CANCELLED = "operation_cancelled"
+
+
+class SchedulerEvent(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    event_type: SchedulerEventType
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    agent_id: str | None = None
+    operation_id: UUID | None = None
+    operation_name: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class Operation(BaseModel):
@@ -28,8 +64,9 @@ class Operation(BaseModel):
     agent_id: str
     payload: dict[str, Any] = Field(default_factory=dict)
     priority: int = 0
-    runtime_status: RuntimeStatus = RuntimeStatus.PENDING
-    result_status: ResultStatus = ResultStatus.NONE
+    lifecycle_status: LifecycleStatus = LifecycleStatus.QUEUED
+    execution_outcome: ExecutionOutcome = ExecutionOutcome.NONE
+    termination_reason: TerminationReason = TerminationReason.NONE
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # actual execution times, set when operation is started/finished
@@ -49,3 +86,12 @@ class TimeWindow(BaseModel):
         if self.end <= self.start:
             raise ValueError("end must be after start")
         return self
+
+
+class SchedulerState(BaseModel):
+    is_running: bool
+    is_paused: bool
+    queue_size: int
+    current_operation: Operation | None = None
+    running_since: datetime | None = None
+    uptime_seconds: float | None = None

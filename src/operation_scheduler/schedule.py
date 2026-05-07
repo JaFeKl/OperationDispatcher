@@ -4,7 +4,12 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from uuid import UUID
 
-from .models import Operation, ResultStatus, RuntimeStatus
+from .models import (
+    ExecutionOutcome,
+    LifecycleStatus,
+    Operation,
+    TerminationReason,
+)
 
 
 class Schedule:
@@ -52,8 +57,9 @@ class Schedule:
         if not self._operations:
             return None
         operation = self._operations.pop(0)
-        operation.runtime_status = RuntimeStatus.RUNNING
-        operation.result_status = ResultStatus.NONE
+        operation.lifecycle_status = LifecycleStatus.RUNNING
+        operation.execution_outcome = ExecutionOutcome.NONE
+        operation.termination_reason = TerminationReason.NONE
         if operation.start_time is None:
             operation.start_time = datetime.now(timezone.utc)
         self._pulled_operations.append(operation)
@@ -72,9 +78,12 @@ class Schedule:
                 "operation must be pulled from this schedule before completion"
             )
 
-        operation.runtime_status = RuntimeStatus.FINISHED
-        if operation.result_status is ResultStatus.NONE:
-            operation.result_status = ResultStatus.SUCCEEDED
+        operation.lifecycle_status = LifecycleStatus.FINISHED
+        if (
+            operation.execution_outcome is ExecutionOutcome.NONE
+            and operation.termination_reason is TerminationReason.NONE
+        ):
+            operation.execution_outcome = ExecutionOutcome.SUCCEEDED
         if operation.finish_time is None:
             operation.finish_time = datetime.now(timezone.utc)
 
@@ -101,8 +110,9 @@ class Schedule:
         operation = self.remove(operation_id)
         if operation is None:
             return None
-        operation.runtime_status = RuntimeStatus.FINISHED
-        operation.result_status = ResultStatus.CANCELLED
+        operation.lifecycle_status = LifecycleStatus.FINISHED
+        operation.execution_outcome = ExecutionOutcome.NONE
+        operation.termination_reason = TerminationReason.CANCELLED_BEFORE_START
         return operation
 
     def _sort_operations(self) -> None:

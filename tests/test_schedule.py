@@ -3,10 +3,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from operation_scheduler import (
+    ExecutionOutcome,
+    LifecycleStatus,
     Operation,
-    ResultStatus,
-    RuntimeStatus,
     Schedule,
+    TerminationReason,
     TimeWindow,
 )
 
@@ -107,8 +108,9 @@ def test_schedule_sets_running_status_on_next_for_windowed_operations() -> None:
     next_operation = schedule.next()
 
     assert next_operation is not None
-    assert next_operation.runtime_status is RuntimeStatus.RUNNING
-    assert next_operation.result_status is ResultStatus.NONE
+    assert next_operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert next_operation.execution_outcome is ExecutionOutcome.NONE
+    assert next_operation.termination_reason is TerminationReason.NONE
 
 
 def test_schedule_rejects_windowed_operation_after_plain_queue_type_locked() -> None:
@@ -256,8 +258,9 @@ def test_schedule_tracks_pulled_and_completed_operations() -> None:
 
     schedule.complete(operation)
     assert schedule.completed_operations == [operation]
-    assert operation.runtime_status is RuntimeStatus.FINISHED
-    assert operation.result_status is ResultStatus.SUCCEEDED
+    assert operation.lifecycle_status is LifecycleStatus.FINISHED
+    assert operation.execution_outcome is ExecutionOutcome.SUCCEEDED
+    assert operation.termination_reason is TerminationReason.NONE
 
 
 def test_schedule_complete_requires_pulled_operation() -> None:
