@@ -53,6 +53,21 @@ class Schedule:
         self._operations.append(operation)
         self._sort_operations()
 
+    def get(self, operation_id: UUID) -> Operation | None:
+        """
+        Get an operation by ID from the schedule, including pending, pulled and completed operations.
+        """
+        for operation in self._pulled_operations:
+            if operation.id == operation_id:
+                return operation
+        for operation in self._operations:
+            if operation.id == operation_id:
+                return operation
+        for operation in self._completed_operations:
+            if operation.id == operation_id:
+                return operation
+        return None
+
     def next(self) -> Operation | None:
         if not self._operations:
             return None

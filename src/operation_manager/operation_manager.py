@@ -278,7 +278,7 @@ class OperationManager:
             )
             return operation
 
-        operation = self._find_queued_operation(operation_id)
+        operation = self.get_operation(operation_id)
         if operation is not None:
             self._emit_event(
                 OperationManagerEventType.OPERATION_CANCEL_REQUESTED,
@@ -321,11 +321,8 @@ class OperationManager:
             raise RuntimeError("no current operation")
         return self._current_operation
 
-    def _find_queued_operation(self, operation_id: UUID) -> Operation | None:
-        for operation in self._schedule.list():
-            if operation.id == operation_id:
-                return operation
-        return None
+    def get_operation(self, operation_id: UUID) -> Operation | None:
+        return self._schedule.get(operation_id)
 
     def _on_start_request_denied(self, operation: Operation) -> None:
         denial_count = self._start_request_denial_counts.get(operation.id, 0) + 1
