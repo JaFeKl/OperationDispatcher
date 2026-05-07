@@ -13,7 +13,7 @@ from operation_scheduler import (
 
 
 def test_add_and_get_next_operation() -> None:
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     operation = Operation(name="sync", agent_id="agent-a")
 
     schedule.add(operation)
@@ -25,7 +25,7 @@ def test_add_and_get_next_operation() -> None:
 
 
 def test_priority_ordering() -> None:
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     low = Operation(name="low", agent_id="agent-a", priority=1)
     high = Operation(name="high", agent_id="agent-a", priority=10)
 
@@ -85,7 +85,7 @@ def test_schedule_orders_operations_with_time_window_by_start_time() -> None:
         priority=1,
     )
 
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     schedule.add(first)
     schedule.add(second)
 
@@ -103,7 +103,7 @@ def test_schedule_sets_running_status_on_next_for_windowed_operations() -> None:
             end=now + timedelta(minutes=10),
         ),
     )
-    schedule = Schedule([operation])
+    schedule = Schedule(agent_id="agent-a", operations=[operation])
 
     next_operation = schedule.next()
 
@@ -115,7 +115,7 @@ def test_schedule_sets_running_status_on_next_for_windowed_operations() -> None:
 
 def test_schedule_rejects_windowed_operation_after_plain_queue_type_locked() -> None:
     now = datetime.now(timezone.utc)
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     schedule.add(Operation(name="plain", agent_id="agent-a", priority=1))
 
     with pytest.raises(ValueError):
@@ -133,7 +133,7 @@ def test_schedule_rejects_windowed_operation_after_plain_queue_type_locked() -> 
 
 def test_schedule_rejects_plain_operation_after_windowed_queue_type_locked() -> None:
     now = datetime.now(timezone.utc)
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     schedule.add(
         Operation(
             name="windowed",
@@ -154,6 +154,7 @@ def test_schedule_rejects_mixed_queue_types_in_init() -> None:
 
     with pytest.raises(ValueError):
         Schedule(
+            agent_id="agent-a",
             operations=[
                 Operation(name="plain", agent_id="agent-a", priority=1),
                 Operation(
@@ -164,7 +165,7 @@ def test_schedule_rejects_mixed_queue_types_in_init() -> None:
                         end=now + timedelta(minutes=5),
                     ),
                 ),
-            ]
+            ],
         )
 
 
@@ -189,7 +190,7 @@ def test_schedule_with_windowed_operations_orders_by_start_then_priority() -> No
         priority=1,
     )
 
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     schedule.add(later)
     schedule.add(earlier)
 
@@ -200,7 +201,7 @@ def test_schedule_accepts_operation_subclass() -> None:
     class CustomOperation(Operation):
         special: str
 
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
 
     custom = CustomOperation(name="custom", agent_id="agent-a", special="x")
     schedule.add(custom)
@@ -247,7 +248,7 @@ def test_schedule_agent_id_property_is_exposed() -> None:
 
 
 def test_schedule_tracks_pulled_and_completed_operations() -> None:
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     operation = Operation(name="sync", agent_id="agent-a")
     schedule.add(operation)
 
@@ -264,7 +265,7 @@ def test_schedule_tracks_pulled_and_completed_operations() -> None:
 
 
 def test_schedule_complete_requires_pulled_operation() -> None:
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     operation = Operation(name="sync", agent_id="agent-a")
     schedule.add(operation)
 
@@ -282,7 +283,7 @@ def test_operation_start_and_finish_times_are_set_on_pull_and_complete() -> None
             end=now + timedelta(minutes=10),
         ),
     )
-    schedule = Schedule()
+    schedule = Schedule(agent_id="agent-a")
     schedule.add(operation)
 
     pulled = schedule.next()

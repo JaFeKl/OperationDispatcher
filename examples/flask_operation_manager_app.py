@@ -10,11 +10,11 @@ from pydantic import BaseModel
 
 from operation_scheduler import (
     Operation,
-    Scheduler,
-    SchedulerEventType,
-    SchedulerOpenAPI,
+    OperationManager,
+    OperationManagerEventType,
+    OperationManagerOpenAPI,
 )
-from operation_scheduler.models import SchedulerEvent
+from operation_scheduler.models import OperationManagerEvent
 
 
 class ExampleOperationPayload(BaseModel):
@@ -25,37 +25,40 @@ class ExampleOperationPayload(BaseModel):
 class MyExampleAgent:
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self._running_operation: dict[UUID, asyncio.Task[None]] = {}
-        self.scheduler = Scheduler(
+        self.operation_manager = OperationManager(
             agent_id="agent-1",
             on_event_callback=self._on_event_handler,
             payload_model=ExampleOperationPayload,
             logger=logger,
         )
 
-        # add some initial operations to the scheduler
-        self.scheduler.add(
+        # add some initial operations to the operation manager
+        self.operation_manager.add(
             Operation(name="collect_metrics", agent_id="agent-1", priority=10)
         )
-        self.scheduler.add(
+        self.operation_manager.add(
             Operation(name="check_battery", agent_id="agent-1", priority=5)
         )
 
-    def _on_event_handler(self, event: SchedulerEvent) -> bool | None:
-        # react on an event emitted by the scheduler, e.g. log it to a database or stream it.
-        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+    def _on_event_handler(self, event: OperationManagerEvent) -> bool | None:
+        # react on an event emitted by the operation manager, e.g. log it to a database or stream it.
+        if event.event_type is OperationManagerEventType.OPERATION_START_REQUESTED:
             return self.can_start_operation(event)
 
-        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
+        if (
+            event.event_type
+            is OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED
+        ):
             return self._dispatch_operation_from_event(event)
 
-        if event.event_type is SchedulerEventType.OPERATION_CANCEL_REQUESTED:
+        if event.event_type is OperationManagerEventType.OPERATION_CANCEL_REQUESTED:
             operation_id = event.operation_id
             if operation_id is not None:
                 self.cancel_operation_task(operation_id)
 
         return None
 
-    def can_start_operation(self, _: SchedulerEvent) -> bool:
+    def can_start_operation(self, _: OperationManagerEvent) -> bool:
         # central place for higher-level admission checks before an operation starts
         return True
 
@@ -64,7 +67,7 @@ class MyExampleAgent:
         await asyncio.sleep(30)
         print("Finished execution of operation:", operation.id)
 
-    def _dispatch_operation_from_event(self, event: SchedulerEvent) -> bool:
+    def _dispatch_operation_from_event(self, event: OperationManagerEvent) -> bool:
         operation_id = event.operation_id
         if operation_id is None:
             return False
@@ -72,7 +75,7 @@ class MyExampleAgent:
         queued_operation = next(
             (
                 operation
-                for operation in self.scheduler.get_schedule()
+                for operation in self.operation_manager.get_schedule()
                 if operation.id == operation_id
             ),
             None,
@@ -92,18 +95,18 @@ class MyExampleAgent:
         try:
             await self.simulate_operation_execution(operation)
             if (
-                self.scheduler.current_operation is not None
-                and self.scheduler.current_operation.id == operation.id
+                self.operation_manager.current_operation is not None
+                and self.operation_manager.current_operation.id == operation.id
             ):
-                self.scheduler.complete_current()
+                self.operation_manager.complete_current()
         except asyncio.CancelledError:
             pass
         except Exception:
             if (
-                self.scheduler.current_operation is not None
-                and self.scheduler.current_operation.id == operation.id
+                self.operation_manager.current_operation is not None
+                and self.operation_manager.current_operation.id == operation.id
             ):
-                self.scheduler.fail_current()
+                self.operation_manager.fail_current()
         finally:
             self._running_operation.pop(operation.id, None)
 
@@ -117,18 +120,18 @@ class MyExampleAgent:
     def create_app(self) -> Flask:
         app = Flask(__name__, static_url_path="/app_static")
 
-        scheduler_api = SchedulerOpenAPI(
-            self.scheduler,
+        operation_manager_api = OperationManagerOpenAPI(
+            self.operation_manager,
         )
 
         swagger_template = {
             "swagger": "2.0",
             "info": {
-                "title": "Operation Scheduler API",
+                "title": "Operation Manager API",
                 "version": "1.0.0",
-                "description": "Example Flask API exposing scheduler endpoints.",
+                "description": "Example Flask API exposing operation manager endpoints.",
             },
-            "definitions": scheduler_api.get_openapi_definitions(),
+            "definitions": operation_manager_api.get_openapi_definitions(),
         }
         swagger_config = {
             "headers": [],
@@ -151,24 +154,24 @@ class MyExampleAgent:
             return (
                 jsonify(
                     {
-                        "message": "Operation Scheduler example API",
+                        "message": "Operation Manager example API",
                         "docs": "/docs/",
                         "openapi": "/openapi.json",
-                        "schedule": "/scheduler/schedule",
-                        "history": "/scheduler/history",
-                        "get_current_operation": "/scheduler/current_operation",
-                        "get_next_operation": "/scheduler/next_operation",
-                        "add_operation": "/scheduler/add_operation",
-                        "cancel_operation": "/scheduler/cancel_operation",
-                        "get_scheduler_state": "/scheduler/state",
-                        "start": "/scheduler/start",
-                        "stop": "/scheduler/stop",
+                        "schedule": "/operation_manager/schedule",
+                        "history": "/operation_manager/history",
+                        "get_current_operation": "/operation_manager/current_operation",
+                        "get_next_operation": "/operation_manager/next_operation",
+                        "add_operation": "/operation_manager/add_operation",
+                        "cancel_operation": "/operation_manager/cancel_operation",
+                        "get_operation_manager_state": "/operation_manager/state",
+                        "start": "/operation_manager/start",
+                        "stop": "/operation_manager/stop",
                     }
                 ),
                 200,
             )
 
-        scheduler_api.register_default_endpoints(app)
+        operation_manager_api.register_default_endpoints(app)
 
         return app
 

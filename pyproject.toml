@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "operation-scheduler"
+name = "operation-manager"
 version = "0.1.0"
-description = "Skeleton scheduling package for physical operations"
+description = "Lightweight operation manager package for physical operations"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

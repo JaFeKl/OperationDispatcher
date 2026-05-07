@@ -2,26 +2,26 @@ from .models import (
     ExecutionOutcome,
     LifecycleStatus,
     Operation,
-    SchedulerEvent,
-    SchedulerEventType,
-    SchedulerState,
+    OperationManagerEvent,
+    OperationManagerEventType,
+    OperationManagerState,
     TerminationReason,
     TimeWindow,
 )
 from .schedule import Schedule
-from .scheduler import Scheduler
-from .scheduler_openapi import SchedulerOpenAPI
+from .operation_manager import OperationManager
+from .operation_manager_openapi import OperationManagerOpenAPI
 
 __all__ = [
     "Operation",
     "LifecycleStatus",
     "ExecutionOutcome",
     "TerminationReason",
-    "SchedulerEvent",
-    "SchedulerEventType",
-    "SchedulerState",
+    "OperationManagerEvent",
+    "OperationManagerEventType",
+    "OperationManagerState",
     "TimeWindow",
     "Schedule",
-    "Scheduler",
-    "SchedulerOpenAPI",
+    "OperationManager",
+    "OperationManagerOpenAPI",
 ]

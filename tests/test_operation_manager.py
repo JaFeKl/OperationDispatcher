@@ -7,18 +7,21 @@ from operation_scheduler import (
     ExecutionOutcome,
     LifecycleStatus,
     Operation,
+    OperationManager,
+    OperationManagerEventType,
+    OperationManagerState,
     Schedule,
-    Scheduler,
-    SchedulerEventType,
-    SchedulerState,
     TerminationReason,
     TimeWindow,
 )
 
+Scheduler = OperationManager
+SchedulerEventType = OperationManagerEventType
+SchedulerState = OperationManagerState
+
 
 def test_scheduler_starts_and_completes_next_operation() -> None:
-    schedule = Schedule(agent_id="agent-a")
-    scheduler = Scheduler(agent_id="agent-a", schedule=schedule)
+    scheduler = Scheduler(agent_id="agent-a")
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -33,7 +36,7 @@ def test_scheduler_starts_and_completes_next_operation() -> None:
     completed = scheduler.complete_current()
     assert completed is operation
     assert scheduler.current_operation is None
-    assert schedule.completed_operations == [operation]
+    assert scheduler.schedule.completed_operations == [operation]
 
 
 def test_scheduler_run_once_executes_and_completes_operation() -> None:
@@ -150,7 +153,7 @@ def test_scheduler_fail_current_sets_finish_time() -> None:
             end=now + timedelta(minutes=10),
         ),
     )
-    scheduler = Scheduler(agent_id="agent-a", schedule=Schedule(agent_id="agent-a"))
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler.add(operation)
     scheduler._start_next()
 
@@ -195,7 +198,7 @@ def test_scheduler_run_once_waits_for_windowed_operation_due_time() -> None:
             end=now + timedelta(minutes=10),
         ),
     )
-    scheduler = Scheduler(agent_id="agent-a", schedule=Schedule(agent_id="agent-a"))
+    scheduler = Scheduler(agent_id="agent-a")
     scheduler.add(operation)
 
     executed = asyncio.run(scheduler.run_once())
@@ -360,8 +363,8 @@ def test_scheduler_records_scheduler_lifecycle_events() -> None:
     asyncio.run(run_scheduler())
     event_types = [event.event_type for event in scheduler.get_event_history()]
 
-    assert SchedulerEventType.SCHEDULER_STARTED in event_types
-    assert SchedulerEventType.SCHEDULER_STOPPED in event_types
+    assert SchedulerEventType.OPERATION_MANAGER_STARTED in event_types
+    assert SchedulerEventType.OPERATION_MANAGER_STOPPED in event_types
 
 
 def test_scheduler_stop_current_emits_stop_requested_before_stopped() -> None:
@@ -404,9 +407,9 @@ def test_scheduler_resume_emits_operation_resume_requested_when_current_exists()
     assert seen_events == [
         SchedulerEventType.OPERATION_ADDED,
         SchedulerEventType.OPERATION_STARTED,
-        SchedulerEventType.SCHEDULER_PAUSED,
+        SchedulerEventType.OPERATION_MANAGER_PAUSED,
         SchedulerEventType.OPERATION_RESUME_REQUESTED,
-        SchedulerEventType.SCHEDULER_RESUMED,
+        SchedulerEventType.OPERATION_MANAGER_RESUMED,
     ]
 
 

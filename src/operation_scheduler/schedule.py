@@ -15,8 +15,8 @@ from .models import (
 class Schedule:
     def __init__(
         self,
+        agent_id: str,
         operations: Iterable[Operation] | None = None,
-        agent_id: str | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._requires_time_window: bool | None = None
@@ -31,7 +31,7 @@ class Schedule:
         return len(self._operations)
 
     @property
-    def agent_id(self) -> str | None:
+    def agent_id(self) -> str:
         return self._agent_id
 
     @property

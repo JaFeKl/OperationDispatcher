@@ -13,26 +13,25 @@ from .models import (
     ExecutionOutcome,
     LifecycleStatus,
     Operation,
-    SchedulerEvent,
-    SchedulerEventType,
-    SchedulerState,
+    OperationManagerEvent,
+    OperationManagerEventType,
+    OperationManagerState,
     TerminationReason,
 )
 from .schedule import Schedule
 
 
-class Scheduler:
+class OperationManager:
     """
     A runtime component that manages the execution of operations based on a schedule.
     It supports adding operations, starting the next operation, completing or failing the current operation, and running continuously with a polling mechanism.
-    The scheduler can be paused and resumed, and it tracks the state of the current operation and the overall schedule.
+    The operation manager can be paused and resumed, and it tracks the state of the current operation and the overall schedule.
     """
 
     def __init__(
         self,
         agent_id: str,
-        schedule: Schedule | None = None,
-        on_event_callback: Callable[[SchedulerEvent], object] | None = None,
+        on_event_callback: Callable[[OperationManagerEvent], object] | None = None,
         poll_interval_seconds: float = 0.1,
         payload_model: Any | None = None,
         logger: logging.Logger | None = None,
@@ -41,16 +40,7 @@ class Scheduler:
             raise ValueError("poll_interval_seconds must be greater than 0")
 
         self._logger = logger
-        if schedule is None:
-            resolved_schedule = Schedule(agent_id=agent_id)
-        else:
-            if schedule.agent_id is None:
-                raise ValueError("schedule.agent_id must be set")
-            if schedule.agent_id != agent_id:
-                raise ValueError("schedule.agent_id must match scheduler agent_id")
-            resolved_schedule = schedule
-
-        self._schedule = resolved_schedule
+        self._schedule = Schedule(agent_id=agent_id)
         self._on_event_callback = on_event_callback
         self._payload_model = payload_model
         self._current_operation: Operation | None = None
@@ -61,8 +51,8 @@ class Scheduler:
         self._running_since: datetime | None = None
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._wakeup_event: asyncio.Event | None = None
-        self._event_listeners: list[Callable[[SchedulerEvent], object]] = []
-        self._event_history: list[SchedulerEvent] = []
+        self._event_listeners: list[Callable[[OperationManagerEvent], object]] = []
+        self._event_history: list[OperationManagerEvent] = []
         self._event_history_limit = 1000
 
     @property
@@ -88,21 +78,21 @@ class Scheduler:
     def add(self, operation: Operation) -> None:
         self._schedule.add(operation)
         self._emit_event(
-            SchedulerEventType.OPERATION_ADDED,
+            OperationManagerEventType.OPERATION_ADDED,
             operation=operation,
         )
 
     def get_schedule(self) -> list[Operation]:
         return self._schedule.list()
 
-    def get_state(self) -> SchedulerState:
+    def get_state(self) -> OperationManagerState:
         now = datetime.now(timezone.utc)
         running_since = self._running_since
         uptime_seconds: float | None = None
         if self._is_running and running_since is not None:
             uptime_seconds = (now - running_since).total_seconds()
 
-        return SchedulerState(
+        return OperationManagerState(
             is_running=self._is_running,
             is_paused=self._is_paused,
             queue_size=len(self._schedule),
@@ -113,16 +103,16 @@ class Scheduler:
 
     def pause(self) -> None:
         self._is_paused = True
-        self._emit_event(SchedulerEventType.SCHEDULER_PAUSED)
+        self._emit_event(OperationManagerEventType.OPERATION_MANAGER_PAUSED)
 
     def resume(self) -> None:
         self._is_paused = False
         if self._current_operation is not None:
             self._emit_event(
-                SchedulerEventType.OPERATION_RESUME_REQUESTED,
+                OperationManagerEventType.OPERATION_RESUME_REQUESTED,
                 operation=self._current_operation,
             )
-        self._emit_event(SchedulerEventType.SCHEDULER_RESUMED)
+        self._emit_event(OperationManagerEventType.OPERATION_MANAGER_RESUMED)
 
     def _start_next(self) -> Operation | None:
         if self._is_paused:
@@ -137,7 +127,7 @@ class Scheduler:
 
         self._current_operation = operation
         self._emit_event(
-            SchedulerEventType.OPERATION_STARTED,
+            OperationManagerEventType.OPERATION_STARTED,
             operation=operation,
         )
         return operation
@@ -169,14 +159,14 @@ class Scheduler:
 
     async def run(self) -> None:
         if self._is_running:
-            raise RuntimeError("scheduler is already running")
+            raise RuntimeError("operation manager is already running")
 
         self._is_running = True
         self._running_since = datetime.now(timezone.utc)
         self._stop_requested = False
         self._runtime_loop = asyncio.get_running_loop()
         self._wakeup_event = asyncio.Event()
-        self._emit_event(SchedulerEventType.SCHEDULER_STARTED)
+        self._emit_event(OperationManagerEventType.OPERATION_MANAGER_STARTED)
         try:
             while not self._stop_requested:
                 try:
@@ -184,7 +174,7 @@ class Scheduler:
                 except Exception as error:
                     if self._logger is not None:
                         self._logger.exception(
-                            "scheduler loop iteration failed",
+                            "operation manager loop iteration failed",
                             exc_info=error,
                         )
 
@@ -195,7 +185,7 @@ class Scheduler:
         finally:
             self._is_running = False
             self._running_since = None
-            self._emit_event(SchedulerEventType.SCHEDULER_STOPPED)
+            self._emit_event(OperationManagerEventType.OPERATION_MANAGER_STOPPED)
             self._runtime_loop = None
             self._wakeup_event = None
 
@@ -213,7 +203,7 @@ class Scheduler:
 
         self._current_operation = None
         self._emit_event(
-            SchedulerEventType.OPERATION_COMPLETED,
+            OperationManagerEventType.OPERATION_COMPLETED,
             operation=operation,
         )
         return operation
@@ -225,7 +215,7 @@ class Scheduler:
         self._schedule.complete(operation)
         self._current_operation = None
         self._emit_event(
-            SchedulerEventType.OPERATION_FAILED,
+            OperationManagerEventType.OPERATION_FAILED,
             operation=operation,
         )
         return operation
@@ -233,7 +223,7 @@ class Scheduler:
     def stop_current(self) -> Operation:
         operation = self._require_current_operation()
         self._emit_event(
-            SchedulerEventType.OPERATION_STOP_REQUESTED,
+            OperationManagerEventType.OPERATION_STOP_REQUESTED,
             operation=operation,
         )
         operation.execution_outcome = ExecutionOutcome.NONE
@@ -241,7 +231,7 @@ class Scheduler:
         self._schedule.complete(operation)
         self._current_operation = None
         self._emit_event(
-            SchedulerEventType.OPERATION_STOPPED,
+            OperationManagerEventType.OPERATION_STOPPED,
             operation=operation,
         )
         return operation
@@ -253,7 +243,7 @@ class Scheduler:
         ):
             operation = self._require_current_operation()
             self._emit_event(
-                SchedulerEventType.OPERATION_CANCEL_REQUESTED,
+                OperationManagerEventType.OPERATION_CANCEL_REQUESTED,
                 operation=operation,
             )
             operation.execution_outcome = ExecutionOutcome.NONE
@@ -261,7 +251,7 @@ class Scheduler:
             self._schedule.complete(operation)
             self._current_operation = None
             self._emit_event(
-                SchedulerEventType.OPERATION_CANCELLED,
+                OperationManagerEventType.OPERATION_CANCELLED,
                 operation=operation,
             )
             return operation
@@ -269,24 +259,26 @@ class Scheduler:
         operation = self._find_queued_operation(operation_id)
         if operation is not None:
             self._emit_event(
-                SchedulerEventType.OPERATION_CANCEL_REQUESTED,
+                OperationManagerEventType.OPERATION_CANCEL_REQUESTED,
                 operation=operation,
             )
 
         operation = self._schedule.cancel(operation_id)
         if operation is not None:
             self._emit_event(
-                SchedulerEventType.OPERATION_CANCELLED,
+                OperationManagerEventType.OPERATION_CANCELLED,
                 operation=operation,
             )
         return operation
 
-    def add_event_listener(self, listener: Callable[[SchedulerEvent], object]) -> None:
+    def add_event_listener(
+        self, listener: Callable[[OperationManagerEvent], object]
+    ) -> None:
         self._event_listeners.append(listener)
 
     def remove_event_listener(
         self,
-        listener: Callable[[SchedulerEvent], object],
+        listener: Callable[[OperationManagerEvent], object],
     ) -> None:
         self._event_listeners = [
             existing_listener
@@ -294,7 +286,9 @@ class Scheduler:
             if existing_listener != listener
         ]
 
-    def get_event_history(self, limit: int | None = None) -> list[SchedulerEvent]:
+    def get_event_history(
+        self, limit: int | None = None
+    ) -> list[OperationManagerEvent]:
         if limit is None:
             return list(self._event_history)
         return list(self._event_history[-limit:])
@@ -313,21 +307,21 @@ class Scheduler:
     async def _request_operation_start(self, operation: Operation) -> bool:
         return await self._request_operation_event(
             operation,
-            SchedulerEventType.OPERATION_START_REQUESTED,
+            OperationManagerEventType.OPERATION_START_REQUESTED,
         )
 
     async def _request_operation_start_dispatch(self, operation: Operation) -> bool:
         return await self._request_operation_event(
             operation,
-            SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+            OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED,
         )
 
     async def _request_operation_event(
         self,
         operation: Operation,
-        event_type: SchedulerEventType,
+        event_type: OperationManagerEventType,
     ) -> bool:
-        event = SchedulerEvent(
+        event = OperationManagerEvent(
             event_type=event_type,
             agent_id=operation.agent_id,
             operation_id=operation.id,
@@ -414,11 +408,11 @@ class Scheduler:
 
     def _emit_event(
         self,
-        event_type: SchedulerEventType,
+        event_type: OperationManagerEventType,
         operation: Operation | None = None,
         data: dict[str, Any] | None = None,
-    ) -> SchedulerEvent:
-        event = SchedulerEvent(
+    ) -> OperationManagerEvent:
+        event = OperationManagerEvent(
             event_type=event_type,
             agent_id=(
                 operation.agent_id if operation is not None else self._schedule.agent_id

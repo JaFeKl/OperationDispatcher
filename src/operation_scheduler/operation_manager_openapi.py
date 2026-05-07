@@ -11,22 +11,22 @@ from flasgger import swag_from
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .models import Operation
-from .scheduler import Scheduler
+from .operation_manager import OperationManager
 
 
-class SchedulerOpenAPI:
+class OperationManagerOpenAPI:
     def __init__(
         self,
-        scheduler: Scheduler,
+        operation_manager: OperationManager,
         default_operation_name: str = "operation",
     ) -> None:
-        self._scheduler = scheduler
-        resolved_agent_id = scheduler.schedule.agent_id
+        self._operation_manager = operation_manager
+        resolved_agent_id = operation_manager.schedule.agent_id
         if resolved_agent_id is None:
-            raise ValueError("scheduler.schedule.agent_id must be set")
+            raise ValueError("operation_manager.schedule.agent_id must be set")
         self._agent_id = resolved_agent_id
         self._default_operation_name = default_operation_name
-        self._payload_model = scheduler.payload_model
+        self._payload_model = operation_manager.payload_model
         self._payload_adapter: TypeAdapter[Any] | None = (
             TypeAdapter(self._payload_model)
             if self._payload_model is not None
@@ -42,7 +42,7 @@ class SchedulerOpenAPI:
     def get_schedule_response(self) -> tuple[list[dict[str, Any]], int]:
         schedule_payload = [
             operation.model_dump(mode="json")
-            for operation in self._scheduler.get_schedule()
+            for operation in self._operation_manager.get_schedule()
         ]
         return schedule_payload, 200
 
@@ -56,7 +56,9 @@ class SchedulerOpenAPI:
         if resolved_limit > 1000:
             return {"error": "limit must be less than or equal to 1000"}, 400
 
-        history_operations = self._scheduler.schedule.history(limit=resolved_limit)
+        history_operations = self._operation_manager.schedule.history(
+            limit=resolved_limit
+        )
         payload = {
             "limit": resolved_limit,
             "count": len(history_operations),
@@ -67,12 +69,12 @@ class SchedulerOpenAPI:
         return payload, 200
 
     def get_current_operation_response(self) -> tuple[dict[str, Any], int]:
-        if self._scheduler.current_operation is None:
+        if self._operation_manager.current_operation is None:
             return {"error": "no current operation"}, 404
-        return self._scheduler.current_operation.model_dump(mode="json"), 200
+        return self._operation_manager.current_operation.model_dump(mode="json"), 200
 
     def get_next_operation_response(self) -> tuple[dict[str, Any], int]:
-        operation = self._scheduler.schedule.peek()
+        operation = self._operation_manager.schedule.peek()
         if operation is None:
             return {"error": "no next operation"}, 404
         return operation.model_dump(mode="json"), 200
@@ -102,7 +104,7 @@ class SchedulerOpenAPI:
             return {"error": str(error)}, 400
 
         try:
-            self._scheduler.add(operation)
+            self._operation_manager.add(operation)
         except (TypeError, ValueError) as error:
             return {"error": str(error)}, 400
 
@@ -116,77 +118,79 @@ class SchedulerOpenAPI:
         except ValueError as error:
             return {"error": str(error)}, 400
 
-        operation = self._scheduler.cancel(parsed_operation_id)
+        operation = self._operation_manager.cancel(parsed_operation_id)
 
         if operation is None:
             return {"error": "operation not found"}, 404
         return operation.model_dump(mode="json"), 200
 
-    def get_scheduler_state_response(self) -> tuple[dict[str, Any], int]:
-        scheduler_state = self._scheduler.get_state().model_dump(mode="json")
-        scheduler_state["runtime_thread_alive"] = (
+    def get_operation_manager_state_response(self) -> tuple[dict[str, Any], int]:
+        operation_manager_state = self._operation_manager.get_state().model_dump(
+            mode="json"
+        )
+        operation_manager_state["runtime_thread_alive"] = (
             self._runtime_thread.is_alive()
             if self._runtime_thread is not None
             else False
         )
-        scheduler_state["runtime_last_error"] = self._runtime_last_error
-        return scheduler_state, 200
+        operation_manager_state["runtime_last_error"] = self._runtime_last_error
+        return operation_manager_state, 200
 
-    def start_scheduler_response(self) -> tuple[dict[str, Any], int]:
-        if self._scheduler.is_running:
-            state, _ = self.get_scheduler_state_response()
+    def start_operation_manager_response(self) -> tuple[dict[str, Any], int]:
+        if self._operation_manager.is_running:
+            state, _ = self.get_operation_manager_state_response()
             return {
-                "message": "scheduler is already running",
+                "message": "operation manager is already running",
                 "state": state,
             }, 200
 
         if self._runtime_thread is not None and self._runtime_thread.is_alive():
-            state, _ = self.get_scheduler_state_response()
+            state, _ = self.get_operation_manager_state_response()
             return {
-                "message": "scheduler runtime thread already active",
+                "message": "operation manager runtime thread already active",
                 "state": state,
             }, 200
 
         self._runtime_last_error = None
 
-        def run_scheduler() -> None:
+        def run_operation_manager() -> None:
             try:
-                asyncio.run(self._scheduler.run())
+                asyncio.run(self._operation_manager.run())
             except Exception as error:
                 self._runtime_last_error = str(error)
 
         self._runtime_thread = threading.Thread(
-            target=run_scheduler,
-            name="SchedulerRuntimeThread",
+            target=run_operation_manager,
+            name="OperationManagerRuntimeThread",
             daemon=True,
         )
         self._runtime_thread.start()
 
         deadline = time.time() + 1.0
-        while not self._scheduler.is_running and time.time() < deadline:
+        while not self._operation_manager.is_running and time.time() < deadline:
             time.sleep(0.01)
 
-        state, _ = self.get_scheduler_state_response()
+        state, _ = self.get_operation_manager_state_response()
         return {
-            "message": "scheduler started",
+            "message": "operation manager started",
             "state": state,
         }, 200
 
-    def stop_scheduler_response(self) -> tuple[dict[str, Any], int]:
-        if not self._scheduler.is_running:
-            state, _ = self.get_scheduler_state_response()
+    def stop_operation_manager_response(self) -> tuple[dict[str, Any], int]:
+        if not self._operation_manager.is_running:
+            state, _ = self.get_operation_manager_state_response()
             return {
-                "message": "scheduler is not running",
+                "message": "operation manager is not running",
                 "state": state,
             }, 200
 
-        self._scheduler.request_stop()
+        self._operation_manager.request_stop()
         if self._runtime_thread is not None and self._runtime_thread.is_alive():
             self._runtime_thread.join(timeout=2.0)
 
-        state, _ = self.get_scheduler_state_response()
+        state, _ = self.get_operation_manager_state_response()
         return {
-            "message": "scheduler stop requested",
+            "message": "operation manager stop requested",
             "state": state,
         }, 200
 
@@ -197,14 +201,14 @@ class SchedulerOpenAPI:
         self.register_get_next_operation_endpoint(app)
         self.register_add_operation_endpoint(app)
         self.register_cancel_operation_endpoint(app)
-        self.register_get_scheduler_state_endpoint(app)
-        self.register_start_scheduler_endpoint(app)
-        self.register_stop_scheduler_endpoint(app)
+        self.register_get_operation_manager_state_endpoint(app)
+        self.register_start_operation_manager_endpoint(app)
+        self.register_stop_operation_manager_endpoint(app)
 
     def register_get_schedule_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/schedule",
+        route: str = "/operation_manager/schedule",
         endpoint_name: str = "get_schedule",
     ) -> None:
         openapi_spec = self.get_schedule_openapi_spec()
@@ -218,7 +222,7 @@ class SchedulerOpenAPI:
     def register_get_schedule_history_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/history",
+        route: str = "/operation_manager/history",
         endpoint_name: str = "get_schedule_history",
     ) -> None:
         openapi_spec = self.get_schedule_history_openapi_spec()
@@ -241,7 +245,7 @@ class SchedulerOpenAPI:
     def register_get_current_operation_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/current_operation",
+        route: str = "/operation_manager/current_operation",
         endpoint_name: str = "get_current_operation",
     ) -> None:
         openapi_spec = self.get_current_operation_openapi_spec()
@@ -255,7 +259,7 @@ class SchedulerOpenAPI:
     def register_get_next_operation_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/next_operation",
+        route: str = "/operation_manager/next_operation",
         endpoint_name: str = "get_next_operation",
     ) -> None:
         openapi_spec = self.get_next_operation_openapi_spec()
@@ -269,7 +273,7 @@ class SchedulerOpenAPI:
     def register_add_operation_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/add_operation",
+        route: str = "/operation_manager/add_operation",
         endpoint_name: str = "add_operation",
     ) -> None:
         openapi_spec = self.add_operation_openapi_spec()
@@ -284,7 +288,7 @@ class SchedulerOpenAPI:
     def register_cancel_operation_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/cancel_operation",
+        route: str = "/operation_manager/cancel_operation",
         endpoint_name: str = "cancel_operation",
     ) -> None:
         openapi_spec = self.cancel_operation_openapi_spec()
@@ -297,56 +301,56 @@ class SchedulerOpenAPI:
             response_body, status_code = self.cancel_operation_response(operation_id)
             return jsonify(response_body), status_code
 
-    def register_get_scheduler_state_endpoint(
+    def register_get_operation_manager_state_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/state",
-        endpoint_name: str = "get_scheduler_state",
+        route: str = "/operation_manager/state",
+        endpoint_name: str = "get_operation_manager_state",
     ) -> None:
-        openapi_spec = self.get_scheduler_state_openapi_spec()
+        openapi_spec = self.get_operation_manager_state_openapi_spec()
 
         @app.get(route, endpoint=endpoint_name)
         @swag_from(openapi_spec)
-        def get_scheduler_state_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.get_scheduler_state_response()
+        def get_operation_manager_state_endpoint() -> tuple[Any, int]:
+            payload, status_code = self.get_operation_manager_state_response()
             return jsonify(payload), status_code
 
-    def register_start_scheduler_endpoint(
+    def register_start_operation_manager_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/start",
+        route: str = "/operation_manager/start",
         endpoint_name: str = "start",
     ) -> None:
-        openapi_spec = self.start_scheduler_openapi_spec()
+        openapi_spec = self.start_operation_manager_openapi_spec()
 
         @app.post(route, endpoint=endpoint_name)
         @swag_from(openapi_spec)
-        def start_scheduler_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.start_scheduler_response()
+        def start_operation_manager_endpoint() -> tuple[Any, int]:
+            payload, status_code = self.start_operation_manager_response()
             return jsonify(payload), status_code
 
-    def register_stop_scheduler_endpoint(
+    def register_stop_operation_manager_endpoint(
         self,
         app: Any,
-        route: str = "/scheduler/stop",
+        route: str = "/operation_manager/stop",
         endpoint_name: str = "stop",
     ) -> None:
-        openapi_spec = self.stop_scheduler_openapi_spec()
+        openapi_spec = self.stop_operation_manager_openapi_spec()
 
         @app.post(route, endpoint=endpoint_name)
         @swag_from(openapi_spec)
-        def stop_scheduler_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.stop_scheduler_response()
+        def stop_operation_manager_endpoint() -> tuple[Any, int]:
+            payload, status_code = self.stop_operation_manager_response()
             return jsonify(payload), status_code
 
     @staticmethod
     def get_schedule_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler"],
+            "tags": ["Operation Manager"],
             "produces": ["application/json"],
             "responses": {
                 200: {
-                    "description": "Queued operations ordered by scheduler priority rules.",
+                    "description": "Queued operations ordered by operation manager priority rules.",
                     "schema": {
                         "type": "array",
                         "items": {"$ref": "#/definitions/ScheduledOperation"},
@@ -358,7 +362,7 @@ class SchedulerOpenAPI:
     @staticmethod
     def get_current_operation_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler"],
+            "tags": ["Operation Manager"],
             "produces": ["application/json"],
             "responses": {
                 200: {
@@ -375,7 +379,7 @@ class SchedulerOpenAPI:
     @staticmethod
     def get_schedule_history_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler"],
+            "tags": ["Operation Manager"],
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -392,7 +396,7 @@ class SchedulerOpenAPI:
             "responses": {
                 200: {
                     "description": "Most recent historic operations.",
-                    "schema": {"$ref": "#/definitions/SchedulerHistoryResponse"},
+                    "schema": {"$ref": "#/definitions/OperationManagerHistoryResponse"},
                 },
                 400: {
                     "description": "Invalid limit value.",
@@ -404,7 +408,7 @@ class SchedulerOpenAPI:
     @staticmethod
     def get_next_operation_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler"],
+            "tags": ["Operation Manager"],
             "produces": ["application/json"],
             "responses": {
                 200: {
@@ -421,7 +425,7 @@ class SchedulerOpenAPI:
     @staticmethod
     def add_operation_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler"],
+            "tags": ["Operation Manager"],
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -447,7 +451,7 @@ class SchedulerOpenAPI:
     @staticmethod
     def cancel_operation_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler"],
+            "tags": ["Operation Manager"],
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -475,40 +479,44 @@ class SchedulerOpenAPI:
         }
 
     @staticmethod
-    def get_scheduler_state_openapi_spec() -> dict[str, Any]:
+    def get_operation_manager_state_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler Runtime"],
+            "tags": ["Operation Manager Runtime"],
             "produces": ["application/json"],
             "responses": {
                 200: {
-                    "description": "Current scheduler runtime state.",
-                    "schema": {"$ref": "#/definitions/SchedulerState"},
+                    "description": "Current operation manager runtime state.",
+                    "schema": {"$ref": "#/definitions/OperationManagerState"},
                 }
             },
         }
 
     @staticmethod
-    def start_scheduler_openapi_spec() -> dict[str, Any]:
+    def start_operation_manager_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler Runtime"],
+            "tags": ["Operation Manager Runtime"],
             "produces": ["application/json"],
             "responses": {
                 200: {
-                    "description": "Scheduler start request result.",
-                    "schema": {"$ref": "#/definitions/SchedulerRuntimeActionResponse"},
+                    "description": "Operation manager start request result.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
                 }
             },
         }
 
     @staticmethod
-    def stop_scheduler_openapi_spec() -> dict[str, Any]:
+    def stop_operation_manager_openapi_spec() -> dict[str, Any]:
         return {
-            "tags": ["Scheduler Runtime"],
+            "tags": ["Operation Manager Runtime"],
             "produces": ["application/json"],
             "responses": {
                 200: {
-                    "description": "Scheduler stop request result.",
-                    "schema": {"$ref": "#/definitions/SchedulerRuntimeActionResponse"},
+                    "description": "Operation manager stop request result.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
                 }
             },
         }
@@ -631,7 +639,7 @@ class SchedulerOpenAPI:
                     "time_window",
                 ],
             },
-            "SchedulerState": {
+            "OperationManagerState": {
                 "type": "object",
                 "properties": {
                     "is_running": {"type": "boolean", "example": True},
@@ -647,12 +655,12 @@ class SchedulerOpenAPI:
                         "type": "string",
                         "format": "date-time",
                         "example": "2026-05-06T12:00:00+00:00",
-                        "description": "Null when scheduler is not running.",
+                        "description": "Null when operation manager is not running.",
                     },
                     "uptime_seconds": {
                         "type": "number",
                         "example": 12.5,
-                        "description": "Null when scheduler is not running.",
+                        "description": "Null when operation manager is not running.",
                     },
                     "runtime_thread_alive": {"type": "boolean", "example": True},
                     "runtime_last_error": {
@@ -672,18 +680,18 @@ class SchedulerOpenAPI:
                     "runtime_last_error",
                 ],
             },
-            "SchedulerRuntimeActionResponse": {
+            "OperationManagerRuntimeActionResponse": {
                 "type": "object",
                 "properties": {
                     "message": {
                         "type": "string",
-                        "example": "scheduler started",
+                        "example": "operation manager started",
                     },
-                    "state": {"$ref": "#/definitions/SchedulerState"},
+                    "state": {"$ref": "#/definitions/OperationManagerState"},
                 },
                 "required": ["message", "state"],
             },
-            "SchedulerHistoryResponse": {
+            "OperationManagerHistoryResponse": {
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "example": 50},

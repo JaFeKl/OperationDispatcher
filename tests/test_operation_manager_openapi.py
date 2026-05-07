@@ -2,7 +2,14 @@ import pytest
 from pydantic import BaseModel
 from typing import TypedDict
 
-from operation_scheduler import Operation, Scheduler, SchedulerOpenAPI
+from operation_scheduler import (
+    Operation,
+    OperationManager,
+    OperationManagerOpenAPI,
+)
+
+Scheduler = OperationManager
+SchedulerOpenAPI = OperationManagerOpenAPI
 
 
 class ExamplePayloadModel(BaseModel):
@@ -32,7 +39,7 @@ def test_scheduler_openapi_get_schedule_response_returns_json_payload() -> None:
 def test_scheduler_openapi_get_schedule_spec_uses_scheduled_operation() -> None:
     spec = SchedulerOpenAPI.get_schedule_openapi_spec()
 
-    assert spec["tags"] == ["Scheduler"]
+    assert spec["tags"] == ["Operation Manager"]
     assert (
         spec["responses"][200]["schema"]["items"]["$ref"]
         == "#/definitions/ScheduledOperation"
@@ -110,7 +117,7 @@ def test_scheduler_openapi_register_get_schedule_endpoint_registers_route() -> N
     scheduler_api.register_get_schedule_endpoint(app)
     client = app.test_client()
 
-    response = client.get("/scheduler/schedule")
+    response = client.get("/operation_manager/schedule")
     body = response.get_json()
 
     assert response.status_code == 200
@@ -174,27 +181,27 @@ def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() 
     scheduler_api.register_default_endpoints(app)
     client = app.test_client()
 
-    assert client.get("/scheduler/schedule").status_code == 200
-    assert client.get("/scheduler/history").status_code == 200
-    assert client.get("/scheduler/current_operation").status_code == 404
-    assert client.get("/scheduler/next_operation").status_code == 200
-    assert client.get("/scheduler/state").status_code == 200
+    assert client.get("/operation_manager/schedule").status_code == 200
+    assert client.get("/operation_manager/history").status_code == 200
+    assert client.get("/operation_manager/current_operation").status_code == 404
+    assert client.get("/operation_manager/next_operation").status_code == 200
+    assert client.get("/operation_manager/state").status_code == 200
 
     add_response = client.post(
-        "/scheduler/add_operation", json={"payload": {"task": "x"}}
+        "/operation_manager/add_operation", json={"payload": {"task": "x"}}
     )
     assert add_response.status_code == 201
     added_id = add_response.get_json()["id"]
 
     cancel_response = client.post(
-        "/scheduler/cancel_operation", json={"operation_id": added_id}
+        "/operation_manager/cancel_operation", json={"operation_id": added_id}
     )
     assert cancel_response.status_code == 200
 
-    start_response = client.post("/scheduler/start")
+    start_response = client.post("/operation_manager/start")
     assert start_response.status_code == 200
 
-    stop_response = client.post("/scheduler/stop")
+    stop_response = client.post("/operation_manager/stop")
     assert stop_response.status_code == 200
 
 
@@ -290,19 +297,19 @@ def test_scheduler_openapi_runtime_start_stop_and_state() -> None:
     scheduler = Scheduler(agent_id="agent-a", poll_interval_seconds=0.01)
     scheduler_api = SchedulerOpenAPI(scheduler)
 
-    start_payload, start_status = scheduler_api.start_scheduler_response()
+    start_payload, start_status = scheduler_api.start_operation_manager_response()
     assert start_status == 200
     assert "message" in start_payload
     assert "state" in start_payload
     assert start_payload["state"]["runtime_thread_alive"] is True
 
-    state_payload, state_status = scheduler_api.get_scheduler_state_response()
+    state_payload, state_status = scheduler_api.get_operation_manager_state_response()
     assert state_status == 200
     assert "is_running" in state_payload
     assert "queue_size" in state_payload
     assert "runtime_thread_alive" in state_payload
 
-    stop_payload, stop_status = scheduler_api.stop_scheduler_response()
+    stop_payload, stop_status = scheduler_api.stop_operation_manager_response()
     assert stop_status == 200
     assert "message" in stop_payload
     assert "state" in stop_payload
@@ -349,7 +356,7 @@ def test_scheduler_openapi_history_endpoint_rejects_invalid_limit_query() -> Non
     scheduler_api.register_get_schedule_history_endpoint(app)
     client = app.test_client()
 
-    response = client.get("/scheduler/history?limit=abc")
+    response = client.get("/operation_manager/history?limit=abc")
 
     assert response.status_code == 400
     assert response.get_json()["error"] == "limit must be an integer"

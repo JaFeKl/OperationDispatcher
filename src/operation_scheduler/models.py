@@ -30,11 +30,11 @@ class TerminationReason(str, Enum):
     DEPENDENCY_FAILED = "dependency_failed"
 
 
-class SchedulerEventType(str, Enum):
-    SCHEDULER_STARTED = "scheduler_started"
-    SCHEDULER_STOPPED = "scheduler_stopped"
-    SCHEDULER_PAUSED = "scheduler_paused"
-    SCHEDULER_RESUMED = "scheduler_resumed"
+class OperationManagerEventType(str, Enum):
+    OPERATION_MANAGER_STARTED = "operation_manager_started"
+    OPERATION_MANAGER_STOPPED = "operation_manager_stopped"
+    OPERATION_MANAGER_PAUSED = "operation_manager_paused"
+    OPERATION_MANAGER_RESUMED = "operation_manager_resumed"
     OPERATION_ADDED = "operation_added"
     OPERATION_CANCEL_REQUESTED = "operation_cancel_requested"
     OPERATION_STOP_REQUESTED = "operation_stop_requested"
@@ -48,9 +48,9 @@ class SchedulerEventType(str, Enum):
     OPERATION_CANCELLED = "operation_cancelled"
 
 
-class SchedulerEvent(BaseModel):
+class OperationManagerEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
-    event_type: SchedulerEventType
+    event_type: OperationManagerEventType
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     agent_id: str | None = None
     operation_id: UUID | None = None
@@ -88,7 +88,7 @@ class TimeWindow(BaseModel):
         return self
 
 
-class SchedulerState(BaseModel):
+class OperationManagerState(BaseModel):
     is_running: bool
     is_paused: bool
     queue_size: int
