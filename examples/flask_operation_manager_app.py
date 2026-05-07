@@ -8,13 +8,13 @@ from flask import Flask, jsonify
 from flasgger import Swagger
 from pydantic import BaseModel
 
-from operation_scheduler import (
+from operation_manager import (
     Operation,
     OperationManager,
     OperationManagerEventType,
     OperationManagerOpenAPI,
 )
-from operation_scheduler.models import OperationManagerEvent
+from operation_manager.models import OperationManagerEvent
 
 
 class ExampleOperationPayload(BaseModel):

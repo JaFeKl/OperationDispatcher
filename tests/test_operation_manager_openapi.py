@@ -2,7 +2,7 @@ import pytest
 from pydantic import BaseModel
 from typing import TypedDict
 
-from operation_scheduler import (
+from operation_manager import (
     Operation,
     OperationManager,
     OperationManagerOpenAPI,

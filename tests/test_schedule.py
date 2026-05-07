@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from operation_scheduler import (
+from operation_manager import (
     ExecutionOutcome,
     LifecycleStatus,
     Operation,
