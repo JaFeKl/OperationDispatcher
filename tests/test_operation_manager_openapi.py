@@ -5,6 +5,7 @@ from typing import TypedDict
 from operation_manager import (
     Operation,
     OperationManager,
+    OperationManagerEventType,
     OperationManagerOpenAPI,
 )
 
@@ -210,6 +211,15 @@ def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() 
     resume_response = client.post("/operation_manager/resume")
     assert resume_response.status_code == 200
 
+    cancel_current_response = client.post("/operation_manager/cancel_current_operation")
+    assert cancel_current_response.status_code in {200, 404, 409}
+
+    stop_current_response = client.post("/operation_manager/stop_current_operation")
+    assert stop_current_response.status_code in {200, 404, 409}
+
+    resume_current_response = client.post("/operation_manager/resume_current_operation")
+    assert resume_current_response.status_code in {200, 404, 409}
+
 
 def test_scheduler_openapi_add_operation_requires_payload() -> None:
     scheduler = Scheduler(agent_id="agent-a")
@@ -357,6 +367,76 @@ def test_scheduler_openapi_runtime_actions_return_409_for_invalid_state() -> Non
     )
     assert second_resume_status == 409
     assert "state" in second_resume_payload
+
+
+def test_scheduler_openapi_current_operation_actions() -> None:
+    def deny_stop_and_resume(event) -> bool | None:
+        if event.event_type in {
+            OperationManagerEventType.OPERATION_STOP_REQUESTED,
+            OperationManagerEventType.OPERATION_RESUME_REQUESTED,
+        }:
+            return False
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=deny_stop_and_resume,
+    )
+    scheduler_api = SchedulerOpenAPI(scheduler)
+
+    missing_cancel_payload, missing_cancel_status = (
+        scheduler_api.cancel_current_operation_response()
+    )
+    assert missing_cancel_status == 404
+    assert missing_cancel_payload["code"] == "no_current_operation"
+
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    denied_stop_payload, denied_stop_status = (
+        scheduler_api.stop_current_operation_response()
+    )
+    assert denied_stop_status == 409
+    assert denied_stop_payload["code"] == "current_operation_stop_denied"
+
+    scheduler.pause()
+    denied_resume_payload, denied_resume_status = (
+        scheduler_api.resume_current_operation_response()
+    )
+    assert denied_resume_status == 409
+    assert denied_resume_payload["code"] == "current_operation_resume_denied"
+
+
+def test_scheduler_openapi_cancel_current_operation_success() -> None:
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
+
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    payload, status_code = scheduler_api.cancel_current_operation_response()
+
+    assert status_code == 200
+    assert payload["id"] == str(operation.id)
+    assert payload["termination_reason"] == "cancelled_during_run"
+
+
+def test_scheduler_openapi_resume_current_operation_does_not_require_manager_pause() -> (
+    None
+):
+    scheduler = Scheduler(agent_id="agent-a")
+    scheduler_api = SchedulerOpenAPI(scheduler)
+
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    payload, status_code = scheduler_api.resume_current_operation_response()
+
+    assert status_code == 200
+    assert payload["id"] == str(operation.id)
 
 
 def test_scheduler_openapi_history_response_uses_limit_and_returns_newest_first() -> (

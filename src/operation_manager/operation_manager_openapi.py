@@ -305,6 +305,86 @@ class OperationManagerOpenAPI:
             "state": state,
         }, 200
 
+    def cancel_current_operation_response(self) -> tuple[dict[str, Any], int]:
+        current_operation = self._operation_manager.current_operation
+        if current_operation is None:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+
+        cancelled_operation = self._operation_manager.cancel(current_operation.id)
+        if cancelled_operation is None:
+            return self._error_response(
+                message="current operation cancellation denied",
+                code="current_operation_cancellation_denied",
+                status_code=409,
+            )
+
+        return cancelled_operation.model_dump(mode="json"), 200
+
+    def stop_current_operation_response(self) -> tuple[dict[str, Any], int]:
+        if self._operation_manager.current_operation is None:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+
+        try:
+            operation = self._operation_manager.stop_current()
+        except RuntimeError:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+
+        current_operation = self._operation_manager.current_operation
+        if current_operation is not None and current_operation.id == operation.id:
+            return self._error_response(
+                message="current operation stop denied",
+                code="current_operation_stop_denied",
+                status_code=409,
+            )
+
+        return operation.model_dump(mode="json"), 200
+
+    def resume_current_operation_response(self) -> tuple[dict[str, Any], int]:
+        if self._operation_manager.current_operation is None:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+
+        try:
+            is_allowed = self._operation_manager.request_resume_current()
+        except RuntimeError:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+
+        if not is_allowed:
+            return self._error_response(
+                message="current operation resume denied",
+                code="current_operation_resume_denied",
+                status_code=409,
+            )
+
+        resumed_operation = self._operation_manager.current_operation
+        if resumed_operation is None:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+
+        return resumed_operation.model_dump(mode="json"), 200
+
     def register_default_endpoints(self, app: Any) -> None:
         self.register_get_schedule_endpoint(app)
         self.register_get_schedule_history_endpoint(app)
@@ -317,6 +397,9 @@ class OperationManagerOpenAPI:
         self.register_stop_operation_manager_endpoint(app)
         self.register_pause_operation_manager_endpoint(app)
         self.register_resume_operation_manager_endpoint(app)
+        self.register_cancel_current_operation_endpoint(app)
+        self.register_stop_current_operation_endpoint(app)
+        self.register_resume_current_operation_endpoint(app)
 
     def _register_json_endpoint(
         self,
@@ -526,6 +609,51 @@ class OperationManagerOpenAPI:
             endpoint_name=endpoint_name,
             openapi_spec=self.resume_operation_manager_openapi_spec(),
             response_handler=self.resume_operation_manager_response,
+        )
+
+    def register_cancel_current_operation_endpoint(
+        self,
+        app: Any,
+        route: str = "/operation_manager/cancel_current_operation",
+        endpoint_name: str = "cancel_current_operation",
+    ) -> None:
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.cancel_current_operation_openapi_spec(),
+            response_handler=self.cancel_current_operation_response,
+        )
+
+    def register_stop_current_operation_endpoint(
+        self,
+        app: Any,
+        route: str = "/operation_manager/stop_current_operation",
+        endpoint_name: str = "stop_current_operation",
+    ) -> None:
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.stop_current_operation_openapi_spec(),
+            response_handler=self.stop_current_operation_response,
+        )
+
+    def register_resume_current_operation_endpoint(
+        self,
+        app: Any,
+        route: str = "/operation_manager/resume_current_operation",
+        endpoint_name: str = "resume_current_operation",
+    ) -> None:
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.resume_current_operation_openapi_spec(),
+            response_handler=self.resume_current_operation_response,
         )
 
     @staticmethod
@@ -766,6 +894,69 @@ class OperationManagerOpenAPI:
             },
         }
 
+    @staticmethod
+    def cancel_current_operation_openapi_spec() -> dict[str, Any]:
+        return {
+            "tags": ["Operation Manager"],
+            "produces": ["application/json"],
+            "responses": {
+                200: {
+                    "description": "Current operation cancelled.",
+                    "schema": {"$ref": "#/definitions/ScheduledOperation"},
+                },
+                404: {
+                    "description": "No current operation.",
+                    "schema": {"$ref": "#/definitions/ErrorResponse"},
+                },
+                409: {
+                    "description": "Current operation cancel request denied.",
+                    "schema": {"$ref": "#/definitions/ErrorResponse"},
+                },
+            },
+        }
+
+    @staticmethod
+    def stop_current_operation_openapi_spec() -> dict[str, Any]:
+        return {
+            "tags": ["Operation Manager"],
+            "produces": ["application/json"],
+            "responses": {
+                200: {
+                    "description": "Current operation stopped.",
+                    "schema": {"$ref": "#/definitions/ScheduledOperation"},
+                },
+                404: {
+                    "description": "No current operation.",
+                    "schema": {"$ref": "#/definitions/ErrorResponse"},
+                },
+                409: {
+                    "description": "Current operation stop request denied.",
+                    "schema": {"$ref": "#/definitions/ErrorResponse"},
+                },
+            },
+        }
+
+    @staticmethod
+    def resume_current_operation_openapi_spec() -> dict[str, Any]:
+        return {
+            "tags": ["Operation Manager"],
+            "produces": ["application/json"],
+            "responses": {
+                200: {
+                    "description": "Current operation resumed.",
+                    "schema": {"$ref": "#/definitions/ScheduledOperation"},
+                },
+                404: {
+                    "description": "No current operation.",
+                    "schema": {"$ref": "#/definitions/ErrorResponse"},
+                },
+                409: {
+                    "description": "Current operation resume request denied.",
+                    "schema": {"$ref": "#/definitions/ErrorResponse"},
+                },
+            },
+        }
+
     def get_openapi_definitions(self) -> dict[str, Any]:
         definitions: dict[str, Any] = {
             "ErrorResponse": {
@@ -795,7 +986,7 @@ class OperationManagerOpenAPI:
             "AddOperationRequest": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "example": "collect_metrics"},
+                    "name": {"type": "string", "example": "your_operation_name"},
                     "payload": self._payload_openapi_schema,
                     "priority": {"type": "integer", "example": 10},
                     "time_window": {
@@ -828,7 +1019,7 @@ class OperationManagerOpenAPI:
                         "format": "uuid",
                         "example": "123e4567-e89b-12d3-a456-426614174000",
                     },
-                    "name": {"type": "string", "example": "collect_metrics"},
+                    "name": {"type": "string", "example": "your_operation_name"},
                     "agent_id": {"type": "string", "example": "agent-1"},
                     "payload": self._payload_openapi_schema,
                     "priority": {"type": "integer", "example": 10},
@@ -985,7 +1176,7 @@ class OperationManagerOpenAPI:
             return {
                 "type": "object",
                 "additionalProperties": True,
-                "example": {"task": "collect_metrics"},
+                "example": {"task": "your_operation_name"},
             }, {}
 
         payload_schema = self._payload_adapter.json_schema()

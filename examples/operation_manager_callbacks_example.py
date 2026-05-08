@@ -42,10 +42,10 @@ async def main() -> None:
     agent = CallbackDrivenAgent()
 
     agent.operation_manager.add(
-        Operation(name="collect_metrics", agent_id="agent-1", priority=10)
+        Operation(name="move_to_station_1", agent_id="agent-1", priority=10)
     )
     agent.operation_manager.add(
-        Operation(name="check_battery", agent_id="agent-1", priority=5)
+        Operation(name="move_to_charging", agent_id="agent-1", priority=5)
     )
 
     runtime_task = asyncio.create_task(agent.operation_manager.run())

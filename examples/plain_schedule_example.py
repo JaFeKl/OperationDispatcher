@@ -6,8 +6,8 @@ from operation_manager import Operation, Schedule
 def main() -> None:
     schedule = Schedule(agent_id="agent-1")
 
-    schedule.add(Operation(name="collect_metrics", agent_id="agent-1", priority=10))
-    schedule.add(Operation(name="check_battery", agent_id="agent-1", priority=5))
+    schedule.add(Operation(name="move_to_station_1", agent_id="agent-1", priority=10))
+    schedule.add(Operation(name="move_to_charging", agent_id="agent-1", priority=5))
 
     print("Queued operations:")
     for operation in schedule.list():

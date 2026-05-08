@@ -321,6 +321,16 @@ class OperationManager:
         )
         return operation
 
+    def request_resume_current(self) -> bool:
+        return self._execute_state_mutation(self._request_resume_current_internal)
+
+    def _request_resume_current_internal(self) -> bool:
+        operation = self._require_current_operation()
+        return self._request_handler.request_operation_with_retry_sync(
+            operation,
+            OperationManagerEventType.OPERATION_RESUME_REQUESTED,
+        )
+
     def cancel(self, operation_id: UUID) -> Operation | None:
         return self._execute_state_mutation(lambda: self._cancel_internal(operation_id))
 

@@ -145,8 +145,8 @@ from operation_manager import Operation, Schedule
 
 schedule = Schedule(agent_id="agent-1")
 
-schedule.add(Operation(name="collect_metrics", agent_id="agent-1", priority=10))
-schedule.add(Operation(name="check_battery", agent_id="agent-1", priority=5))
+schedule.add(Operation(name="move_to_station", agent_id="agent-1", priority=5))
+schedule.add(Operation(name="return_to_charging", agent_id="agent-1", priority=1))
 
 next_operation = schedule.peek()  # highest-priority next item
 queued_operations = schedule.list()
@@ -191,8 +191,8 @@ async def main() -> None:
 		start_request_retry_cooldown_seconds=1.0,
 	)
 
-	operation_manager.add(Operation(name="collect_metrics", agent_id="agent-1", priority=10))
-	operation_manager.add(Operation(name="check_battery", agent_id="agent-1", priority=5))
+	operation_manager.add(Operation(name="move_to_station", agent_id="agent-1", priority=5))
+	operation_manager.add(Operation(name="wait_for_operator", agent_id="agent-1", priority=5))
 
 	runtime_task = asyncio.create_task(operation_manager.run())
 	await asyncio.sleep(2)
@@ -249,6 +249,9 @@ are represented as a real OpenAPI model reference (`$ref`) in `definitions`.
 - `GET /operation_manager/next_operation`
 - `POST /operation_manager/add_operation`
 - `POST /operation_manager/cancel_operation`
+- `POST /operation_manager/cancel_current_operation`
+- `POST /operation_manager/stop_current_operation`
+- `POST /operation_manager/resume_current_operation`
 - `GET /operation_manager/state`
 - `POST /operation_manager/start`
 - `POST /operation_manager/stop`
