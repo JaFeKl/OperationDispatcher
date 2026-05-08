@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -38,6 +39,26 @@ class OperationManagerOpenAPI:
         ) = self._build_payload_openapi_components()
         self._runtime_thread: threading.Thread | None = None
         self._runtime_last_error: str | None = None
+        self._runtime_lock = threading.Lock()
+        self._runtime_startup_timeout_seconds = 1.0
+        self._runtime_stop_join_timeout_seconds = 2.0
+
+    @staticmethod
+    def _error_response(
+        *,
+        message: str,
+        code: str,
+        status_code: int,
+        details: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        payload: dict[str, Any] = {
+            "error": message,
+            "message": message,
+            "code": code,
+        }
+        if details:
+            payload["details"] = details
+        return payload, status_code
 
     def get_schedule_response(self) -> tuple[list[dict[str, Any]], int]:
         schedule_payload = [
@@ -52,9 +73,17 @@ class OperationManagerOpenAPI:
     ) -> tuple[dict[str, Any], int]:
         resolved_limit = 50 if limit is None else limit
         if resolved_limit < 1:
-            return {"error": "limit must be greater than 0"}, 400
+            return self._error_response(
+                message="limit must be greater than 0",
+                code="invalid_limit",
+                status_code=400,
+            )
         if resolved_limit > 1000:
-            return {"error": "limit must be less than or equal to 1000"}, 400
+            return self._error_response(
+                message="limit must be less than or equal to 1000",
+                code="invalid_limit",
+                status_code=400,
+            )
 
         history_operations = self._operation_manager.schedule.history(
             limit=resolved_limit
@@ -70,13 +99,21 @@ class OperationManagerOpenAPI:
 
     def get_current_operation_response(self) -> tuple[dict[str, Any], int]:
         if self._operation_manager.current_operation is None:
-            return {"error": "no current operation"}, 404
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
         return self._operation_manager.current_operation.model_dump(mode="json"), 200
 
     def get_next_operation_response(self) -> tuple[dict[str, Any], int]:
         operation = self._operation_manager.schedule.peek()
         if operation is None:
-            return {"error": "no next operation"}, 404
+            return self._error_response(
+                message="no next operation",
+                code="no_next_operation",
+                status_code=404,
+            )
         return operation.model_dump(mode="json"), 200
 
     def add_operation_response(
@@ -84,7 +121,11 @@ class OperationManagerOpenAPI:
         operation_payload: dict[str, Any],
     ) -> tuple[dict[str, Any], int]:
         if "payload" not in operation_payload:
-            return {"error": "payload is required"}, 400
+            return self._error_response(
+                message="payload is required",
+                code="missing_payload",
+                status_code=400,
+            )
 
         try:
             normalized_operation_payload = dict(operation_payload)
@@ -92,7 +133,11 @@ class OperationManagerOpenAPI:
                 operation_payload["payload"],
             )
         except (ValidationError, TypeError, ValueError) as error:
-            return {"error": str(error)}, 400
+            return self._error_response(
+                message=str(error),
+                code="invalid_payload",
+                status_code=400,
+            )
 
         normalized_payload = normalized_operation_payload
         normalized_payload["agent_id"] = self._resolved_agent_id()
@@ -101,12 +146,20 @@ class OperationManagerOpenAPI:
         try:
             operation = self._operation_from_payload(normalized_payload)
         except (ValidationError, TypeError, ValueError) as error:
-            return {"error": str(error)}, 400
+            return self._error_response(
+                message=str(error),
+                code="invalid_operation",
+                status_code=400,
+            )
 
         try:
             self._operation_manager.add(operation)
         except (TypeError, ValueError) as error:
-            return {"error": str(error)}, 400
+            return self._error_response(
+                message=str(error),
+                code="operation_rejected",
+                status_code=400,
+            )
 
         return operation.model_dump(mode="json"), 201
 
@@ -116,12 +169,20 @@ class OperationManagerOpenAPI:
         try:
             parsed_operation_id = UUID(operation_id)
         except ValueError as error:
-            return {"error": str(error)}, 400
+            return self._error_response(
+                message=str(error),
+                code="invalid_operation_id",
+                status_code=400,
+            )
 
         operation = self._operation_manager.cancel(parsed_operation_id)
 
         if operation is None:
-            return {"error": "operation not found"}, 404
+            return self._error_response(
+                message="operation not found",
+                code="operation_not_found",
+                status_code=404,
+            )
         return operation.model_dump(mode="json"), 200
 
     def get_operation_manager_state_response(self) -> tuple[dict[str, Any], int]:
@@ -137,62 +198,82 @@ class OperationManagerOpenAPI:
         return operation_manager_state, 200
 
     def start_operation_manager_response(self) -> tuple[dict[str, Any], int]:
-        if self._operation_manager.is_running:
-            state, _ = self.get_operation_manager_state_response()
-            return {
-                "message": "operation manager is already running",
-                "state": state,
-            }, 200
+        with self._runtime_lock:
+            if self._operation_manager.is_running:
+                state, _ = self.get_operation_manager_state_response()
+                return {
+                    "message": "operation manager is already running",
+                    "state": state,
+                }, 409
 
-        if self._runtime_thread is not None and self._runtime_thread.is_alive():
-            state, _ = self.get_operation_manager_state_response()
-            return {
-                "message": "operation manager runtime thread already active",
-                "state": state,
-            }, 200
+            if self._runtime_thread is not None and self._runtime_thread.is_alive():
+                state, _ = self.get_operation_manager_state_response()
+                return {
+                    "message": "operation manager runtime thread already active",
+                    "state": state,
+                }, 409
 
-        self._runtime_last_error = None
+            self._runtime_last_error = None
 
-        def run_operation_manager() -> None:
-            try:
-                asyncio.run(self._operation_manager.run())
-            except Exception as error:
-                self._runtime_last_error = str(error)
+            def run_operation_manager() -> None:
+                try:
+                    asyncio.run(self._operation_manager.run())
+                except Exception as error:
+                    self._runtime_last_error = str(error)
 
-        self._runtime_thread = threading.Thread(
-            target=run_operation_manager,
-            name="OperationManagerRuntimeThread",
-            daemon=True,
-        )
-        self._runtime_thread.start()
+            self._runtime_thread = threading.Thread(
+                target=run_operation_manager,
+                name="OperationManagerRuntimeThread",
+                daemon=True,
+            )
+            self._runtime_thread.start()
 
-        deadline = time.time() + 1.0
+        deadline = time.time() + self._runtime_startup_timeout_seconds
         while not self._operation_manager.is_running and time.time() < deadline:
             time.sleep(0.01)
 
         state, _ = self.get_operation_manager_state_response()
+        if self._operation_manager.is_running:
+            return {
+                "message": "operation manager started",
+                "state": state,
+            }, 202
+
+        if self._runtime_last_error:
+            return {
+                "message": "operation manager failed to start",
+                "state": state,
+                "error": self._runtime_last_error,
+            }, 500
+
         return {
-            "message": "operation manager started",
+            "message": "operation manager start requested",
             "state": state,
-        }, 200
+        }, 202
 
     def stop_operation_manager_response(self) -> tuple[dict[str, Any], int]:
-        if not self._operation_manager.is_running:
-            state, _ = self.get_operation_manager_state_response()
-            return {
-                "message": "operation manager is not running",
-                "state": state,
-            }, 200
+        with self._runtime_lock:
+            runtime_active = (
+                self._runtime_thread is not None and self._runtime_thread.is_alive()
+            )
+            if not self._operation_manager.is_running and not runtime_active:
+                state, _ = self.get_operation_manager_state_response()
+                return {
+                    "message": "operation manager is not running",
+                    "state": state,
+                }, 409
 
-        self._operation_manager.request_stop()
-        if self._runtime_thread is not None and self._runtime_thread.is_alive():
-            self._runtime_thread.join(timeout=2.0)
+            self._operation_manager.request_stop()
+            runtime_thread = self._runtime_thread
+
+        if runtime_thread is not None and runtime_thread.is_alive():
+            runtime_thread.join(timeout=self._runtime_stop_join_timeout_seconds)
 
         state, _ = self.get_operation_manager_state_response()
         return {
             "message": "operation manager stop requested",
             "state": state,
-        }, 200
+        }, 202
 
     def pause_operation_manager_response(self) -> tuple[dict[str, Any], int]:
         if self._operation_manager.is_paused:
@@ -200,7 +281,7 @@ class OperationManagerOpenAPI:
             return {
                 "message": "operation manager is already paused",
                 "state": state,
-            }, 200
+            }, 409
 
         self._operation_manager.pause()
         state, _ = self.get_operation_manager_state_response()
@@ -215,7 +296,7 @@ class OperationManagerOpenAPI:
             return {
                 "message": "operation manager is not paused",
                 "state": state,
-            }, 200
+            }, 409
 
         self._operation_manager.resume()
         state, _ = self.get_operation_manager_state_response()
@@ -237,19 +318,45 @@ class OperationManagerOpenAPI:
         self.register_pause_operation_manager_endpoint(app)
         self.register_resume_operation_manager_endpoint(app)
 
+    def _register_json_endpoint(
+        self,
+        app: Any,
+        *,
+        method: str,
+        route: str,
+        endpoint_name: str,
+        openapi_spec: dict[str, Any],
+        response_handler: Callable[
+            [], tuple[dict[str, Any] | list[dict[str, Any]], int]
+        ],
+    ) -> None:
+        @app.route(route, methods=[method.upper()], endpoint=endpoint_name)
+        @swag_from(openapi_spec)
+        def endpoint() -> tuple[Any, int]:
+            payload, status_code = response_handler()
+            return jsonify(payload), status_code
+
+    @staticmethod
+    def _parse_json_body() -> dict[str, Any]:
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict):
+            return payload
+        return {}
+
     def register_get_schedule_endpoint(
         self,
         app: Any,
         route: str = "/operation_manager/schedule",
         endpoint_name: str = "get_schedule",
     ) -> None:
-        openapi_spec = self.get_schedule_openapi_spec()
-
-        @app.get(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def get_schedule_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.get_schedule_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="GET",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.get_schedule_openapi_spec(),
+            response_handler=self.get_schedule_response,
+        )
 
     def register_get_schedule_history_endpoint(
         self,
@@ -257,11 +364,7 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/history",
         endpoint_name: str = "get_schedule_history",
     ) -> None:
-        openapi_spec = self.get_schedule_history_openapi_spec()
-
-        @app.get(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def get_schedule_history_endpoint() -> tuple[Any, int]:
+        def response_handler() -> tuple[dict[str, Any], int]:
             limit_value = request.args.get("limit")
             if limit_value is None:
                 parsed_limit = None
@@ -269,10 +372,22 @@ class OperationManagerOpenAPI:
                 try:
                     parsed_limit = int(limit_value)
                 except ValueError:
-                    return jsonify({"error": "limit must be an integer"}), 400
+                    return self._error_response(
+                        message="limit must be an integer",
+                        code="invalid_limit",
+                        status_code=400,
+                    )
 
-            payload, status_code = self.get_schedule_history_response(parsed_limit)
-            return jsonify(payload), status_code
+            return self.get_schedule_history_response(parsed_limit)
+
+        self._register_json_endpoint(
+            app,
+            method="GET",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.get_schedule_history_openapi_spec(),
+            response_handler=response_handler,
+        )
 
     def register_get_current_operation_endpoint(
         self,
@@ -280,13 +395,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/current_operation",
         endpoint_name: str = "get_current_operation",
     ) -> None:
-        openapi_spec = self.get_current_operation_openapi_spec()
-
-        @app.get(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def get_current_operation_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.get_current_operation_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="GET",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.get_current_operation_openapi_spec(),
+            response_handler=self.get_current_operation_response,
+        )
 
     def register_get_next_operation_endpoint(
         self,
@@ -294,13 +410,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/next_operation",
         endpoint_name: str = "get_next_operation",
     ) -> None:
-        openapi_spec = self.get_next_operation_openapi_spec()
-
-        @app.get(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def get_next_operation_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.get_next_operation_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="GET",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.get_next_operation_openapi_spec(),
+            response_handler=self.get_next_operation_response,
+        )
 
     def register_add_operation_endpoint(
         self,
@@ -308,14 +425,16 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/add_operation",
         endpoint_name: str = "add_operation",
     ) -> None:
-        openapi_spec = self.add_operation_openapi_spec()
-
-        @app.post(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def add_operation_endpoint() -> tuple[Any, int]:
-            payload = request.get_json(silent=True) or {}
-            response_body, status_code = self.add_operation_response(payload)
-            return jsonify(response_body), status_code
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.add_operation_openapi_spec(),
+            response_handler=lambda: self.add_operation_response(
+                self._parse_json_body()
+            ),
+        )
 
     def register_cancel_operation_endpoint(
         self,
@@ -323,15 +442,16 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/cancel_operation",
         endpoint_name: str = "cancel_operation",
     ) -> None:
-        openapi_spec = self.cancel_operation_openapi_spec()
-
-        @app.post(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def cancel_operation_endpoint() -> tuple[Any, int]:
-            payload = request.get_json(silent=True) or {}
-            operation_id = payload.get("operation_id", "")
-            response_body, status_code = self.cancel_operation_response(operation_id)
-            return jsonify(response_body), status_code
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.cancel_operation_openapi_spec(),
+            response_handler=lambda: self.cancel_operation_response(
+                self._parse_json_body().get("operation_id", "")
+            ),
+        )
 
     def register_get_operation_manager_state_endpoint(
         self,
@@ -339,13 +459,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/state",
         endpoint_name: str = "get_operation_manager_state",
     ) -> None:
-        openapi_spec = self.get_operation_manager_state_openapi_spec()
-
-        @app.get(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def get_operation_manager_state_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.get_operation_manager_state_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="GET",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.get_operation_manager_state_openapi_spec(),
+            response_handler=self.get_operation_manager_state_response,
+        )
 
     def register_start_operation_manager_endpoint(
         self,
@@ -353,13 +474,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/start",
         endpoint_name: str = "start",
     ) -> None:
-        openapi_spec = self.start_operation_manager_openapi_spec()
-
-        @app.post(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def start_operation_manager_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.start_operation_manager_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.start_operation_manager_openapi_spec(),
+            response_handler=self.start_operation_manager_response,
+        )
 
     def register_stop_operation_manager_endpoint(
         self,
@@ -367,13 +489,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/stop",
         endpoint_name: str = "stop",
     ) -> None:
-        openapi_spec = self.stop_operation_manager_openapi_spec()
-
-        @app.post(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def stop_operation_manager_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.stop_operation_manager_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.stop_operation_manager_openapi_spec(),
+            response_handler=self.stop_operation_manager_response,
+        )
 
     def register_pause_operation_manager_endpoint(
         self,
@@ -381,13 +504,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/pause",
         endpoint_name: str = "pause",
     ) -> None:
-        openapi_spec = self.pause_operation_manager_openapi_spec()
-
-        @app.post(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def pause_operation_manager_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.pause_operation_manager_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.pause_operation_manager_openapi_spec(),
+            response_handler=self.pause_operation_manager_response,
+        )
 
     def register_resume_operation_manager_endpoint(
         self,
@@ -395,13 +519,14 @@ class OperationManagerOpenAPI:
         route: str = "/operation_manager/resume",
         endpoint_name: str = "resume",
     ) -> None:
-        openapi_spec = self.resume_operation_manager_openapi_spec()
-
-        @app.post(route, endpoint=endpoint_name)
-        @swag_from(openapi_spec)
-        def resume_operation_manager_endpoint() -> tuple[Any, int]:
-            payload, status_code = self.resume_operation_manager_response()
-            return jsonify(payload), status_code
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.resume_operation_manager_openapi_spec(),
+            response_handler=self.resume_operation_manager_response,
+        )
 
     @staticmethod
     def get_schedule_openapi_spec() -> dict[str, Any]:
@@ -557,12 +682,24 @@ class OperationManagerOpenAPI:
             "tags": ["Operation Manager Runtime"],
             "produces": ["application/json"],
             "responses": {
-                200: {
+                202: {
                     "description": "Operation manager start request result.",
                     "schema": {
                         "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
                     },
-                }
+                },
+                409: {
+                    "description": "Operation manager is already running.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                },
+                500: {
+                    "description": "Operation manager failed to start.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                },
             },
         }
 
@@ -572,12 +709,18 @@ class OperationManagerOpenAPI:
             "tags": ["Operation Manager Runtime"],
             "produces": ["application/json"],
             "responses": {
-                200: {
+                202: {
                     "description": "Operation manager stop request result.",
                     "schema": {
                         "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
                     },
-                }
+                },
+                409: {
+                    "description": "Operation manager is not running.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                },
             },
         }
 
@@ -592,7 +735,13 @@ class OperationManagerOpenAPI:
                     "schema": {
                         "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
                     },
-                }
+                },
+                409: {
+                    "description": "Operation manager is already paused.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                },
             },
         }
 
@@ -607,7 +756,13 @@ class OperationManagerOpenAPI:
                     "schema": {
                         "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
                     },
-                }
+                },
+                409: {
+                    "description": "Operation manager is not paused.",
+                    "schema": {
+                        "$ref": "#/definitions/OperationManagerRuntimeActionResponse"
+                    },
+                },
             },
         }
 
@@ -617,8 +772,14 @@ class OperationManagerOpenAPI:
                 "type": "object",
                 "properties": {
                     "error": {"type": "string", "example": "operation not found"},
+                    "message": {"type": "string", "example": "operation not found"},
+                    "code": {"type": "string", "example": "operation_not_found"},
+                    "details": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
                 },
-                "required": ["error"],
+                "required": ["error", "message", "code"],
             },
             "CancelOperationRequest": {
                 "type": "object",

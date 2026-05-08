@@ -199,10 +199,10 @@ def test_scheduler_openapi_register_default_endpoints_exposes_required_routes() 
     assert cancel_response.status_code == 200
 
     start_response = client.post("/operation_manager/start")
-    assert start_response.status_code == 200
+    assert start_response.status_code == 202
 
     stop_response = client.post("/operation_manager/stop")
-    assert stop_response.status_code == 200
+    assert stop_response.status_code == 202
 
     pause_response = client.post("/operation_manager/pause")
     assert pause_response.status_code == 200
@@ -304,7 +304,7 @@ def test_scheduler_openapi_runtime_start_stop_and_state() -> None:
     scheduler_api = SchedulerOpenAPI(scheduler)
 
     start_payload, start_status = scheduler_api.start_operation_manager_response()
-    assert start_status == 200
+    assert start_status == 202
     assert "message" in start_payload
     assert "state" in start_payload
     assert start_payload["state"]["runtime_thread_alive"] is True
@@ -324,10 +324,39 @@ def test_scheduler_openapi_runtime_start_stop_and_state() -> None:
     assert resume_payload["state"]["is_paused"] is False
 
     stop_payload, stop_status = scheduler_api.stop_operation_manager_response()
-    assert stop_status == 200
+    assert stop_status == 202
     assert "message" in stop_payload
     assert "state" in stop_payload
     assert stop_payload["state"]["is_running"] is False
+
+
+def test_scheduler_openapi_runtime_actions_return_409_for_invalid_state() -> None:
+    scheduler = Scheduler(agent_id="agent-a", poll_interval_seconds=0.01)
+    scheduler_api = SchedulerOpenAPI(scheduler)
+
+    stop_payload, stop_status = scheduler_api.stop_operation_manager_response()
+    assert stop_status == 409
+    assert "state" in stop_payload
+
+    pause_payload, pause_status = scheduler_api.pause_operation_manager_response()
+    assert pause_status == 200
+    assert pause_payload["state"]["is_paused"] is True
+
+    second_pause_payload, second_pause_status = (
+        scheduler_api.pause_operation_manager_response()
+    )
+    assert second_pause_status == 409
+    assert "state" in second_pause_payload
+
+    resume_payload, resume_status = scheduler_api.resume_operation_manager_response()
+    assert resume_status == 200
+    assert resume_payload["state"]["is_paused"] is False
+
+    second_resume_payload, second_resume_status = (
+        scheduler_api.resume_operation_manager_response()
+    )
+    assert second_resume_status == 409
+    assert "state" in second_resume_payload
 
 
 def test_scheduler_openapi_history_response_uses_limit_and_returns_newest_first() -> (

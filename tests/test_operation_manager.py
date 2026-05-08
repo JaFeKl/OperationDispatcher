@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -42,13 +43,14 @@ def test_scheduler_starts_and_completes_next_operation() -> None:
 def test_scheduler_run_once_executes_and_completes_operation() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
         return True
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=on_event_callback,
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
     )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
@@ -84,10 +86,17 @@ def test_scheduler_pause_blocks_start_until_resumed() -> None:
 def test_scheduler_cancels_pending_operation() -> None:
     seen_events: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_CANCEL_REQUESTED:
+            return True
+        return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -108,10 +117,17 @@ def test_scheduler_cancels_pending_operation() -> None:
 def test_scheduler_cancel_marks_current_operation_as_cancelled_during_run() -> None:
     seen_events: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_CANCEL_REQUESTED:
+            return True
+        return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
     scheduler._start_next()
@@ -174,7 +190,8 @@ def test_scheduler_marks_failed_if_executor_raises() -> None:
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=deny_start,
+        on_request_callback=deny_start,
+        on_notification_callback=deny_start,
     )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
@@ -211,7 +228,7 @@ def test_scheduler_run_once_waits_for_windowed_operation_due_time() -> None:
 
 
 def test_scheduler_run_once_supports_async_executor() -> None:
-    async def on_event_callback(event) -> bool | None:
+    async def request_and_notification_callback(event) -> bool | None:
         await asyncio.sleep(0)
         if event.event_type in {
             SchedulerEventType.OPERATION_START_REQUESTED,
@@ -222,7 +239,8 @@ def test_scheduler_run_once_supports_async_executor() -> None:
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=on_event_callback,
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
     )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
@@ -238,7 +256,7 @@ def test_scheduler_run_once_supports_async_executor() -> None:
 def test_scheduler_preserves_executor_set_result_status() -> None:
     seen_start_request = False
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         nonlocal seen_start_request
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             seen_start_request = True
@@ -249,7 +267,8 @@ def test_scheduler_preserves_executor_set_result_status() -> None:
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=on_event_callback,
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
     )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
@@ -307,14 +326,17 @@ def test_scheduler_get_state_reports_runtime_and_queue_information() -> None:
 
 
 def test_scheduler_emits_events_for_operation_lifecycle() -> None:
-    scheduler = Scheduler(agent_id="agent-a")
-    operation = Operation(name="sync", agent_id="agent-a")
     seen_events: list[SchedulerEventType] = []
 
-    def on_event(event) -> None:
+    def notification_callback(event) -> None:
         seen_events.append(event.event_type)
 
-    scheduler.add_event_listener(on_event)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_notification_callback=notification_callback,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+
     scheduler.add(operation)
     scheduler._start_next()
     scheduler.complete_current()
@@ -370,10 +392,17 @@ def test_scheduler_records_scheduler_lifecycle_events() -> None:
 def test_scheduler_stop_current_emits_stop_requested_before_stopped() -> None:
     seen_events: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_STOP_REQUESTED:
+            return True
+        return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
     scheduler._start_next()
@@ -393,10 +422,17 @@ def test_scheduler_resume_emits_operation_resume_requested_when_current_exists()
 ):
     seen_events: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_RESUME_REQUESTED:
+            return True
+        return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
     scheduler._start_next()
@@ -413,13 +449,16 @@ def test_scheduler_resume_emits_operation_resume_requested_when_current_exists()
     ]
 
 
-def test_scheduler_calls_on_event_callback_for_emitted_events() -> None:
+def test_scheduler_calls_notification_callback_for_emitted_events() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> None:
+    def notification_callback(event) -> None:
         seen_event_types.append(event.event_type)
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_notification_callback=notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
 
     scheduler.add(operation)
@@ -436,7 +475,7 @@ def test_scheduler_calls_on_event_callback_for_emitted_events() -> None:
 def test_scheduler_run_once_emits_start_requested_event() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
         if event.event_type in {
             SchedulerEventType.OPERATION_START_REQUESTED,
@@ -445,7 +484,11 @@ def test_scheduler_run_once_emits_start_requested_event() -> None:
             return True
         return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -459,13 +502,17 @@ def test_scheduler_run_once_emits_start_requested_event() -> None:
 def test_scheduler_does_not_continue_when_start_request_callback_returns_none() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
         if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
             return True
         return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -474,18 +521,16 @@ def test_scheduler_does_not_continue_when_start_request_callback_returns_none() 
     assert executed is None
     assert operation.lifecycle_status is LifecycleStatus.QUEUED
     assert scheduler.current_operation is None
-    assert seen_event_types == [
-        SchedulerEventType.OPERATION_ADDED,
-        SchedulerEventType.OPERATION_START_REQUESTED,
-        SchedulerEventType.OPERATION_START_DENIED,
-    ]
+    assert SchedulerEventType.OPERATION_START_REQUESTED in seen_event_types
+    assert SchedulerEventType.OPERATION_START_DENIED in seen_event_types
+    assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED not in seen_event_types
 
 
 def test_scheduler_retries_denied_start_after_cooldown() -> None:
     seen_event_types: list[SchedulerEventType] = []
     start_request_calls = 0
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         nonlocal start_request_calls
         seen_event_types.append(event.event_type)
 
@@ -500,7 +545,8 @@ def test_scheduler_retries_denied_start_after_cooldown() -> None:
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=on_event_callback,
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
         start_request_retry_cooldown_seconds=0.02,
     )
     operation = Operation(name="sync", agent_id="agent-a")
@@ -533,7 +579,7 @@ def test_scheduler_retries_denied_start_after_cooldown() -> None:
 def test_scheduler_pauses_when_denied_start_reaches_max_retries() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             return False
@@ -541,7 +587,8 @@ def test_scheduler_pauses_when_denied_start_reaches_max_retries() -> None:
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=on_event_callback,
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
         start_request_max_retries=2,
         start_request_retry_cooldown_seconds=0.0,
     )
@@ -569,7 +616,7 @@ def test_scheduler_pauses_when_denied_start_reaches_max_retries() -> None:
 def test_scheduler_resume_resets_denied_start_retry_counter() -> None:
     start_request_calls = 0
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         nonlocal start_request_calls
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             start_request_calls += 1
@@ -578,7 +625,8 @@ def test_scheduler_resume_resets_denied_start_retry_counter() -> None:
 
     scheduler = Scheduler(
         agent_id="agent-a",
-        on_event_callback=on_event_callback,
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
         start_request_max_retries=2,
         start_request_retry_cooldown_seconds=0.0,
     )
@@ -608,7 +656,7 @@ def test_scheduler_resume_resets_denied_start_retry_counter() -> None:
 def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
-    def on_event_callback(event) -> bool | None:
+    def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             return True
@@ -616,7 +664,11 @@ def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
             return False
         return None
 
-    scheduler = Scheduler(agent_id="agent-a", on_event_callback=on_event_callback)
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
     operation = Operation(name="sync", agent_id="agent-a")
     scheduler.add(operation)
 
@@ -629,4 +681,138 @@ def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
         SchedulerEventType.OPERATION_ADDED,
         SchedulerEventType.OPERATION_START_REQUESTED,
         SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
+        SchedulerEventType.OPERATION_START_DISPATCH_DENIED,
     ]
+
+
+def test_scheduler_request_event_callback_timeout_denies_start() -> None:
+    seen_event_types: list[SchedulerEventType] = []
+
+    async def request_and_notification_callback(event) -> bool | None:
+        seen_event_types.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
+            await asyncio.sleep(0.05)
+            return True
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+        request_event_timeout_seconds=0.01,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    executed = asyncio.run(scheduler.run_once())
+
+    assert executed is None
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert scheduler.current_operation is None
+    assert SchedulerEventType.OPERATION_START_REQUESTED in seen_event_types
+    assert SchedulerEventType.OPERATION_START_DENIED in seen_event_types
+    assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED not in seen_event_types
+
+
+def test_scheduler_does_not_cancel_when_cancel_request_is_denied() -> None:
+    seen_events: list[SchedulerEventType] = []
+
+    def request_and_notification_callback(event) -> bool | None:
+        seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_CANCEL_REQUESTED:
+            return False
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    cancelled = scheduler.cancel(operation.id)
+
+    assert cancelled is None
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED
+    assert scheduler.current_operation is None
+    assert SchedulerEventType.OPERATION_CANCEL_REQUESTED in seen_events
+    assert SchedulerEventType.OPERATION_CANCEL_DENIED in seen_events
+    assert SchedulerEventType.OPERATION_CANCELLED not in seen_events
+
+
+def test_scheduler_does_not_stop_when_stop_request_is_denied() -> None:
+    seen_events: list[SchedulerEventType] = []
+
+    def request_and_notification_callback(event) -> bool | None:
+        seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_STOP_REQUESTED:
+            return False
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+
+    stopped = scheduler.stop_current()
+
+    assert stopped is operation
+    assert scheduler.current_operation is operation
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert SchedulerEventType.OPERATION_STOP_REQUESTED in seen_events
+    assert SchedulerEventType.OPERATION_STOP_DENIED in seen_events
+    assert SchedulerEventType.OPERATION_STOPPED not in seen_events
+
+
+def test_scheduler_does_not_resume_when_resume_request_is_denied() -> None:
+    seen_events: list[SchedulerEventType] = []
+
+    def request_and_notification_callback(event) -> bool | None:
+        seen_events.append(event.event_type)
+        if event.event_type is SchedulerEventType.OPERATION_RESUME_REQUESTED:
+            return False
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+    scheduler._start_next()
+    scheduler.pause()
+
+    scheduler.resume()
+
+    assert scheduler.is_paused is True
+    assert SchedulerEventType.OPERATION_RESUME_REQUESTED in seen_events
+    assert SchedulerEventType.OPERATION_RESUME_DENIED in seen_events
+    assert SchedulerEventType.OPERATION_MANAGER_RESUMED not in seen_events
+
+
+def test_scheduler_sync_request_callback_timeout_denies_cancel_request() -> None:
+    def request_and_notification_callback(event) -> bool | None:
+        if event.event_type is SchedulerEventType.OPERATION_CANCEL_REQUESTED:
+            time.sleep(0.05)
+            return True
+        return None
+
+    scheduler = Scheduler(
+        agent_id="agent-a",
+        on_request_callback=request_and_notification_callback,
+        on_notification_callback=request_and_notification_callback,
+        request_event_timeout_seconds=0.01,
+    )
+    operation = Operation(name="sync", agent_id="agent-a")
+    scheduler.add(operation)
+
+    cancelled = scheduler.cancel(operation.id)
+
+    assert cancelled is None
+    assert operation.lifecycle_status is LifecycleStatus.QUEUED

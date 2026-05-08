@@ -7,6 +7,7 @@ from operation_manager import (
     LifecycleStatus,
     Operation,
     Schedule,
+    ScheduleSortStrategy,
     TerminationReason,
     TimeWindow,
 )
@@ -32,8 +33,12 @@ def test_priority_ordering() -> None:
     schedule.add(low)
     schedule.add(high)
 
-    assert schedule.next() == high
-    assert schedule.next() == low
+    first = schedule.next()
+    assert first == high
+    schedule.complete(high)
+
+    second = schedule.next()
+    assert second == low
 
 
 def test_operation_time_window_and_actual_times() -> None:
@@ -89,8 +94,12 @@ def test_schedule_orders_operations_with_time_window_by_start_time() -> None:
     schedule.add(first)
     schedule.add(second)
 
-    assert schedule.next() == second
-    assert schedule.next() == first
+    pulled_second = schedule.next()
+    assert pulled_second == second
+    schedule.complete(second)
+
+    pulled_first = schedule.next()
+    assert pulled_first == first
 
 
 def test_schedule_sets_running_status_on_next_for_windowed_operations() -> None:
@@ -254,10 +263,11 @@ def test_schedule_tracks_pulled_and_completed_operations() -> None:
 
     pulled = schedule.next()
     assert pulled is operation
-    assert schedule.pulled_operations == [operation]
+    assert schedule.pulled_operation is operation
     assert schedule.completed_operations == []
 
     schedule.complete(operation)
+    assert schedule.pulled_operation is None
     assert schedule.completed_operations == [operation]
     assert operation.lifecycle_status is LifecycleStatus.FINISHED
     assert operation.execution_outcome is ExecutionOutcome.SUCCEEDED
@@ -293,3 +303,98 @@ def test_operation_start_and_finish_times_are_set_on_pull_and_complete() -> None
 
     schedule.complete(operation)
     assert operation.finish_time is not None
+
+
+def test_schedule_rejects_pulling_multiple_operations_without_terminal_transition() -> (
+    None
+):
+    schedule = Schedule(agent_id="agent-a")
+    first = Operation(name="first", agent_id="agent-a")
+    second = Operation(name="second", agent_id="agent-a")
+    schedule.add(first)
+    schedule.add(second)
+
+    pulled_first = schedule.next()
+
+    assert pulled_first is first
+    with pytest.raises(RuntimeError):
+        schedule.next()
+
+
+def test_schedule_cancel_active_operation_moves_it_to_completed_history() -> None:
+    schedule = Schedule(agent_id="agent-a")
+    operation = Operation(name="sync", agent_id="agent-a")
+    schedule.add(operation)
+    schedule.next()
+
+    cancelled = schedule.cancel(operation.id)
+
+    assert cancelled is operation
+    assert schedule.pulled_operation is None
+    assert operation.lifecycle_status is LifecycleStatus.FINISHED
+    assert operation.execution_outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.CANCELLED_DURING_RUN
+    assert operation.finish_time is not None
+    assert schedule.completed_operations == [operation]
+
+
+def test_schedule_can_sort_windowed_operations_by_priority_first() -> None:
+    now = datetime.now(timezone.utc)
+    higher_priority_later_start = Operation(
+        name="later-high-priority",
+        agent_id="agent-a",
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=20),
+            end=now + timedelta(minutes=30),
+        ),
+        priority=100,
+    )
+    lower_priority_earlier_start = Operation(
+        name="earlier-low-priority",
+        agent_id="agent-a",
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=10),
+            end=now + timedelta(minutes=15),
+        ),
+        priority=1,
+    )
+
+    schedule = Schedule(
+        agent_id="agent-a",
+        sort_strategy=ScheduleSortStrategy.PRIORITY_THEN_START_TIME,
+    )
+    schedule.add(higher_priority_later_start)
+    schedule.add(lower_priority_earlier_start)
+
+    assert schedule.next() == higher_priority_later_start
+
+
+def test_schedule_can_sort_windowed_operations_by_start_time_first() -> None:
+    now = datetime.now(timezone.utc)
+    higher_priority_later_start = Operation(
+        name="later-high-priority",
+        agent_id="agent-a",
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=20),
+            end=now + timedelta(minutes=30),
+        ),
+        priority=100,
+    )
+    lower_priority_earlier_start = Operation(
+        name="earlier-low-priority",
+        agent_id="agent-a",
+        time_window=TimeWindow(
+            start=now + timedelta(minutes=10),
+            end=now + timedelta(minutes=15),
+        ),
+        priority=1,
+    )
+
+    schedule = Schedule(
+        agent_id="agent-a",
+        sort_strategy=ScheduleSortStrategy.START_TIME_THEN_PRIORITY,
+    )
+    schedule.add(higher_priority_later_start)
+    schedule.add(lower_priority_earlier_start)
+
+    assert schedule.next() == lower_priority_earlier_start

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import logging
+import threading
+import time
 from uuid import UUID
 
 from flask import Flask, jsonify
@@ -18,104 +19,134 @@ from operation_manager.models import OperationManagerEvent
 
 
 class ExampleOperationPayload(BaseModel):
-    instruction: str
+    source_station: str
+    target_station: str
+    pallet_id: str
     retries: int = 0
 
 
-class MyExampleAgent:
+class DemoAgentService:
     def __init__(self, logger: logging.Logger | None = None) -> None:
-        self._running_operation: dict[UUID, asyncio.Task[None]] = {}
+        self._logger = logger
+        self._running_timers: dict[UUID, threading.Timer] = {}
+        self._start_attempts: dict[UUID, int] = {}
+
         self.operation_manager = OperationManager(
             agent_id="agent-1",
-            on_event_callback=self._on_event_handler,
+            on_request_callback=self._on_request_handler,
+            on_notification_callback=self._on_notification_handler,
+            start_request_max_retries=3,
+            start_request_retry_cooldown_seconds=1.0,
+            request_event_timeout_seconds=2.0,
             payload_model=ExampleOperationPayload,
             logger=logger,
         )
 
-        # add some initial operations to the operation manager
         self.operation_manager.add(
-            Operation(name="collect_metrics", agent_id="agent-1", priority=10)
+            Operation(
+                name="pickup_pallet",
+                agent_id="agent-1",
+                priority=10,
+                payload=ExampleOperationPayload(
+                    source_station="INBOUND_A",
+                    target_station="BUFFER_01",
+                    pallet_id="PALLET-1001",
+                ).model_dump(),
+            )
         )
         self.operation_manager.add(
-            Operation(name="check_battery", agent_id="agent-1", priority=5)
+            Operation(
+                name="dropoff_pallet",
+                agent_id="agent-1",
+                priority=5,
+                payload=ExampleOperationPayload(
+                    source_station="BUFFER_01",
+                    target_station="OUTBOUND_B",
+                    pallet_id="PALLET-1001",
+                ).model_dump(),
+            )
         )
 
-    def _on_event_handler(self, event: OperationManagerEvent) -> bool | None:
-        # react on an event emitted by the operation manager, e.g. log it to a database or stream it.
+    def _on_request_handler(self, event: OperationManagerEvent) -> bool | None:
         if event.event_type is OperationManagerEventType.OPERATION_START_REQUESTED:
-            return self.can_start_operation(event)
+            return self._allow_start_with_one_initial_denial(event)
 
         if (
             event.event_type
             is OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED
         ):
-            return self._dispatch_operation_from_event(event)
+            return True
 
         if event.event_type is OperationManagerEventType.OPERATION_CANCEL_REQUESTED:
             operation_id = event.operation_id
             if operation_id is not None:
-                self.cancel_operation_task(operation_id)
+                self._cancel_running_timer(operation_id)
+
+        if event.event_type is OperationManagerEventType.OPERATION_STOP_REQUESTED:
+            current = self.operation_manager.current_operation
+            if current is not None:
+                self._cancel_running_timer(current.id)
+
+        if event.event_type is OperationManagerEventType.OPERATION_RESUME_REQUESTED:
+            return True
 
         return None
 
-    def can_start_operation(self, _: OperationManagerEvent) -> bool:
-        # central place for higher-level admission checks before an operation starts
-        return True
+    def _on_notification_handler(self, event: OperationManagerEvent) -> None:
+        if event.event_type is OperationManagerEventType.OPERATION_STARTED:
+            operation_id = event.operation_id
+            if operation_id is not None:
+                self._schedule_completion(operation_id, delay_seconds=1.0)
 
-    async def simulate_operation_execution(self, operation: Operation) -> None:
-        print("Starting execution of operation:", operation.id)
-        await asyncio.sleep(30)
-        print("Finished execution of operation:", operation.id)
+        if event.event_type is OperationManagerEventType.OPERATION_START_DENIED:
+            if self._logger is not None:
+                self._logger.info(
+                    "start denied for operation %s with metadata=%s",
+                    event.operation_id,
+                    event.data,
+                )
 
-    def _dispatch_operation_from_event(self, event: OperationManagerEvent) -> bool:
+        if event.event_type is OperationManagerEventType.OPERATION_CANCELLED:
+            operation_id = event.operation_id
+            if operation_id is not None:
+                self._cancel_running_timer(operation_id)
+
+    def _allow_start_with_one_initial_denial(
+        self, event: OperationManagerEvent
+    ) -> bool:
         operation_id = event.operation_id
         if operation_id is None:
             return False
 
-        queued_operation = next(
-            (
-                operation
-                for operation in self.operation_manager.get_schedule()
-                if operation.id == operation_id
-            ),
-            None,
-        )
-        if queued_operation is None:
+        attempt = self._start_attempts.get(operation_id, 0) + 1
+        self._start_attempts[operation_id] = attempt
+
+        if attempt == 1:
+            if self._logger is not None:
+                self._logger.info(
+                    "denying first start request for operation %s to demonstrate retry/cooldown",
+                    operation_id,
+                )
             return False
 
-        self._dispatch_operation(queued_operation)
         return True
 
-    def _dispatch_operation(self, operation: Operation) -> None:
-        # In a real implementation, this would trigger the actual execution of the operation, e.g. by sending a command to a robot or invoking an external API.
-        task = asyncio.create_task(self._run_and_report(operation))
-        self._running_operation[operation.id] = task
+    def _schedule_completion(self, operation_id: UUID, delay_seconds: float) -> None:
+        self._cancel_running_timer(operation_id)
 
-    async def _run_and_report(self, operation: Operation) -> None:
-        try:
-            await self.simulate_operation_execution(operation)
-            if (
-                self.operation_manager.current_operation is not None
-                and self.operation_manager.current_operation.id == operation.id
-            ):
+        def complete_if_current() -> None:
+            current = self.operation_manager.current_operation
+            if current is not None and current.id == operation_id:
                 self.operation_manager.complete_current()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            if (
-                self.operation_manager.current_operation is not None
-                and self.operation_manager.current_operation.id == operation.id
-            ):
-                self.operation_manager.fail_current()
-        finally:
-            self._running_operation.pop(operation.id, None)
 
-    def cancel_operation_task(self, operation_id: UUID) -> None:
-        # act on a cancellation event
-        print("Cancellation requested for operation:", operation_id)
-        task = self._running_operation.get(operation_id)
-        if task is not None and not task.done():
-            task.cancel()
+        timer = threading.Timer(delay_seconds, complete_if_current)
+        self._running_timers[operation_id] = timer
+        timer.start()
+
+    def _cancel_running_timer(self, operation_id: UUID) -> None:
+        timer = self._running_timers.pop(operation_id, None)
+        if timer is not None:
+            timer.cancel()
 
     def create_app(self) -> Flask:
         app = Flask(__name__, static_url_path="/app_static")
@@ -154,7 +185,11 @@ class MyExampleAgent:
             return (
                 jsonify(
                     {
-                        "message": "Operation Manager example API",
+                        "message": "Operation Manager Flask + OpenAPI demo",
+                        "notes": {
+                            "start_handshake": "first start request for each operation is denied once to demonstrate retry/cooldown",
+                            "completion": "operations are auto-completed 1 second after OPERATION_STARTED",
+                        },
                         "docs": "/docs/",
                         "openapi": "/openapi.json",
                         "schedule": "/operation_manager/schedule",
@@ -182,6 +217,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger(__name__)
 
-    my_agent = MyExampleAgent(logger=logger)
-    app = my_agent.create_app()
+    demo_agent = DemoAgentService(logger=logger)
+    app = demo_agent.create_app()
+    logger.info("starting Flask demo on http://localhost:8000")
+    logger.info("open docs at http://localhost:8000/docs/")
     app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)

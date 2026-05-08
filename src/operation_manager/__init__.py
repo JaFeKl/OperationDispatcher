@@ -8,7 +8,7 @@ from .models import (
     TerminationReason,
     TimeWindow,
 )
-from .schedule import Schedule
+from .schedule import Schedule, ScheduleSortStrategy
 from .operation_manager import OperationManager
 from .operation_manager_openapi import OperationManagerOpenAPI
 
@@ -22,6 +22,7 @@ __all__ = [
     "OperationManagerState",
     "TimeWindow",
     "Schedule",
+    "ScheduleSortStrategy",
     "OperationManager",
     "OperationManagerOpenAPI",
 ]
