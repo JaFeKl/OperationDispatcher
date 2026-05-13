@@ -9,22 +9,32 @@ from datetime import datetime, timezone
 from typing import Any, cast
 from uuid import UUID
 
-from .models import Operation, OperationManagerEvent, OperationManagerEventType
+from .models import (
+    DispatchEvent,
+    EventType,
+    RequestDecision,
+    RequestDecisionRecord,
+    ScheduledOperation,
+)
 from .retry_policy import RetryPolicy
 
 
 class RequestHandler:
     def __init__(
         self,
-        on_request_callback: Callable[[OperationManagerEvent], object] | None,
+        on_request_callback: Callable[[DispatchEvent], object] | None,
         request_retry_policy: RetryPolicy,
         request_event_timeout_seconds: float,
-        append_event_history: Callable[[OperationManagerEvent], None],
+        append_event_history: Callable[[DispatchEvent], None],
         emit_event: Callable[
-            [OperationManagerEventType, Operation | None, dict[str, Any] | None],
+            [
+                EventType,
+                ScheduledOperation | None,
+                dict[str, Any] | None,
+            ],
             object,
         ],
-        log_event: Callable[[OperationManagerEvent], None],
+        log_event: Callable[[DispatchEvent], None],
         notify_wakeup: Callable[[], None],
         pause: Callable[[], None],
     ) -> None:
@@ -37,35 +47,26 @@ class RequestHandler:
         self._notify_wakeup = notify_wakeup
         self._pause = pause
 
-    async def request_operation_start(self, operation: Operation) -> bool:
+    async def request_operation_start(self, operation: ScheduledOperation) -> bool:
         return await self.request_operation_with_retry(
             operation,
-            OperationManagerEventType.OPERATION_START_REQUESTED,
+            EventType.OPERATION_START_REQUESTED,
         )
 
-    async def request_operation_start_dispatch(self, operation: Operation) -> bool:
-        return await self.request_operation_with_retry(
-            operation,
-            OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        )
-
-    def has_request_cooldown(self, operation: Operation) -> bool:
+    def has_request_cooldown(self, operation: ScheduledOperation) -> bool:
         now = datetime.now(timezone.utc)
-        request_event_types = (
-            OperationManagerEventType.OPERATION_START_REQUESTED,
-            OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        )
+        request_event_types = (EventType.OPERATION_START_REQUESTED,)
         for request_event_type in request_event_types:
-            retry_key = self._request_retry_key(operation.id, request_event_type)
+            retry_key = self._request_retry_key(
+                operation.operation.id,
+                request_event_type,
+            )
             if self._request_retry_policy.is_cooldown_active(retry_key, now):
                 return True
         return False
 
     def clear_request_retry_state(self, operation_id: UUID) -> None:
-        request_event_types = (
-            OperationManagerEventType.OPERATION_START_REQUESTED,
-            OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        )
+        request_event_types = (EventType.OPERATION_START_REQUESTED,)
         for request_event_type in request_event_types:
             retry_key = self._request_retry_key(operation_id, request_event_type)
             self._request_retry_policy.clear(retry_key)
@@ -75,16 +76,16 @@ class RequestHandler:
 
     def request_cooldown_wait_seconds(
         self,
-        operation: Operation,
+        operation: ScheduledOperation,
         now: datetime,
     ) -> float:
         cooldown_wait_seconds = 0.0
-        request_event_types = (
-            OperationManagerEventType.OPERATION_START_REQUESTED,
-            OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        )
+        request_event_types = (EventType.OPERATION_START_REQUESTED,)
         for request_event_type in request_event_types:
-            retry_key = self._request_retry_key(operation.id, request_event_type)
+            retry_key = self._request_retry_key(
+                operation.operation.id,
+                request_event_type,
+            )
             wait_seconds = self._request_retry_policy.cooldown_wait_seconds(
                 retry_key,
                 now,
@@ -94,16 +95,16 @@ class RequestHandler:
 
     def request_operation_with_retry_sync(
         self,
-        operation: Operation,
-        event_type: OperationManagerEventType,
+        operation: ScheduledOperation,
+        event_type: EventType,
     ) -> bool:
         now = datetime.now(timezone.utc)
-        retry_key = self._request_retry_key(operation.id, event_type)
+        retry_key = self._request_retry_key(operation.operation.id, event_type)
         if self._request_retry_policy.is_cooldown_active(retry_key, now):
             return False
 
-        is_allowed = self._request_operation_event_sync(operation, event_type)
-        if is_allowed:
+        decision = self._request_operation_event_sync(operation, event_type)
+        if decision.is_allowed:
             self._request_retry_policy.clear(retry_key)
             return True
 
@@ -114,10 +115,15 @@ class RequestHandler:
 
         denied_event_type = self._denied_event_type(event_type)
         if denied_event_type is not None:
+            denied_metadata = dict(metadata)
+            if decision.reason is not None:
+                denied_metadata["reason"] = decision.reason
+            if decision.metadata:
+                denied_metadata["decision_metadata"] = decision.metadata
             self._emit_event(
                 denied_event_type,
                 operation,
-                metadata,
+                denied_metadata,
             )
 
         if max_retries_reached:
@@ -126,16 +132,16 @@ class RequestHandler:
 
     async def request_operation_with_retry(
         self,
-        operation: Operation,
-        event_type: OperationManagerEventType,
+        operation: ScheduledOperation,
+        event_type: EventType,
     ) -> bool:
         now = datetime.now(timezone.utc)
-        retry_key = self._request_retry_key(operation.id, event_type)
+        retry_key = self._request_retry_key(operation.operation.id, event_type)
         if self._request_retry_policy.is_cooldown_active(retry_key, now):
             return False
 
-        is_allowed = await self._request_operation_event(operation, event_type)
-        if is_allowed:
+        decision = await self._request_operation_event(operation, event_type)
+        if decision.is_allowed:
             self._request_retry_policy.clear(retry_key)
             return True
 
@@ -146,10 +152,15 @@ class RequestHandler:
 
         denied_event_type = self._denied_event_type(event_type)
         if denied_event_type is not None:
+            denied_metadata = dict(metadata)
+            if decision.reason is not None:
+                denied_metadata["reason"] = decision.reason
+            if decision.metadata:
+                denied_metadata["decision_metadata"] = decision.metadata
             self._emit_event(
                 denied_event_type,
                 operation,
-                metadata,
+                denied_metadata,
             )
 
         if max_retries_reached:
@@ -159,78 +170,133 @@ class RequestHandler:
     def _request_retry_key(
         self,
         operation_id: UUID,
-        event_type: OperationManagerEventType,
-    ) -> tuple[OperationManagerEventType, UUID]:
+        event_type: EventType,
+    ) -> tuple[EventType, UUID]:
         return (event_type, operation_id)
 
     @staticmethod
     def _denied_event_type(
-        requested_event_type: OperationManagerEventType,
-    ) -> OperationManagerEventType | None:
+        requested_event_type: EventType,
+    ) -> EventType | None:
         denied_event_type_by_requested_event_type = {
-            OperationManagerEventType.OPERATION_START_REQUESTED: OperationManagerEventType.OPERATION_START_DENIED,
-            OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED: OperationManagerEventType.OPERATION_START_DISPATCH_DENIED,
-            OperationManagerEventType.OPERATION_CANCEL_REQUESTED: OperationManagerEventType.OPERATION_CANCEL_DENIED,
-            OperationManagerEventType.OPERATION_STOP_REQUESTED: OperationManagerEventType.OPERATION_STOP_DENIED,
-            OperationManagerEventType.OPERATION_RESUME_REQUESTED: OperationManagerEventType.OPERATION_RESUME_DENIED,
+            EventType.OPERATION_START_REQUESTED: EventType.OPERATION_START_DENIED,
+            EventType.OPERATION_CANCEL_REQUESTED: EventType.OPERATION_CANCEL_DENIED,
+            EventType.OPERATION_STOP_REQUESTED: EventType.OPERATION_STOP_DENIED,
+            EventType.OPERATION_RESUME_REQUESTED: EventType.OPERATION_RESUME_DENIED,
         }
         return denied_event_type_by_requested_event_type.get(requested_event_type)
 
     async def _request_operation_event(
         self,
-        operation: Operation,
-        event_type: OperationManagerEventType,
-    ) -> bool:
-        event = OperationManagerEvent(
+        operation: ScheduledOperation,
+        event_type: EventType,
+    ) -> RequestDecision:
+        event = DispatchEvent(
             event_type=event_type,
-            agent_id=operation.agent_id,
-            operation_id=operation.id,
-            operation_name=operation.name,
+            resource_id=operation.resource_id,
+            operation_id=operation.operation.id,
             data={},
         )
         self._append_event_history(event)
 
-        is_allowed = self._on_request_callback is None
+        decision = RequestDecision(is_allowed=True)
         if self._on_request_callback is not None:
             try:
                 callback_result = await self._invoke_request_callback_async(event)
-                is_allowed = callback_result is True
-            except Exception:
-                is_allowed = False
+                decision = self._resolve_request_decision(callback_result)
+            except Exception as error:
+                decision = RequestDecision(
+                    is_allowed=False,
+                    reason="request_callback_exception",
+                    metadata={"error": str(error)},
+                )
+
+        self._record_request_decision(
+            operation=operation,
+            event_type=event_type,
+            decision=decision,
+        )
+        event.data = self._decision_event_data(decision)
 
         self._log_event(event)
         self._notify_wakeup()
-        return is_allowed
+        return decision
 
     def _request_operation_event_sync(
         self,
-        operation: Operation,
-        event_type: OperationManagerEventType,
-    ) -> bool:
-        event = OperationManagerEvent(
+        operation: ScheduledOperation,
+        event_type: EventType,
+    ) -> RequestDecision:
+        event = DispatchEvent(
             event_type=event_type,
-            agent_id=operation.agent_id,
-            operation_id=operation.id,
-            operation_name=operation.name,
+            resource_id=operation.resource_id,
+            operation_id=operation.operation.id,
             data={},
         )
         self._append_event_history(event)
 
-        is_allowed = self._on_request_callback is None
+        decision = RequestDecision(is_allowed=True)
         if self._on_request_callback is not None:
             try:
                 callback_result = self._invoke_request_callback_sync(event)
-                is_allowed = callback_result is True
-            except Exception:
-                is_allowed = False
+                decision = self._resolve_request_decision(callback_result)
+            except Exception as error:
+                decision = RequestDecision(
+                    is_allowed=False,
+                    reason="request_callback_exception",
+                    metadata={"error": str(error)},
+                )
+
+        self._record_request_decision(
+            operation=operation,
+            event_type=event_type,
+            decision=decision,
+        )
+        event.data = self._decision_event_data(decision)
 
         self._log_event(event)
         self._notify_wakeup()
-        return is_allowed
+        return decision
 
-    async def _invoke_request_callback_async(
-        self, event: OperationManagerEvent
-    ) -> object:
+    @staticmethod
+    def _resolve_request_decision(callback_result: object) -> RequestDecision:
+        if isinstance(callback_result, RequestDecision):
+            return callback_result
+        if callback_result is True:
+            return RequestDecision(is_allowed=True)
+        if callback_result is False:
+            return RequestDecision(is_allowed=False)
+        return RequestDecision(
+            is_allowed=False,
+            reason="invalid_callback_result",
+            metadata={"result_type": type(callback_result).__name__},
+        )
+
+    @staticmethod
+    def _decision_event_data(decision: RequestDecision) -> dict[str, Any]:
+        data: dict[str, Any] = {"is_allowed": decision.is_allowed}
+        if decision.reason is not None:
+            data["reason"] = decision.reason
+        if decision.metadata:
+            data["metadata"] = decision.metadata
+        return data
+
+    @staticmethod
+    def _record_request_decision(
+        operation: ScheduledOperation,
+        event_type: EventType,
+        decision: RequestDecision,
+    ) -> None:
+        operation.request_decision_history.append(
+            RequestDecisionRecord(
+                event_type=event_type,
+                is_allowed=decision.is_allowed,
+                reason=decision.reason,
+                metadata=decision.metadata,
+            )
+        )
+
+    async def _invoke_request_callback_async(self, event: DispatchEvent) -> object:
         if self._on_request_callback is None:
             raise RuntimeError("on_request_callback is not configured")
 
@@ -245,7 +311,7 @@ class RequestHandler:
             )
         return callback_result
 
-    def _invoke_request_callback_sync(self, event: OperationManagerEvent) -> object:
+    def _invoke_request_callback_sync(self, event: DispatchEvent) -> object:
         if self._on_request_callback is None:
             raise RuntimeError("on_request_callback is not configured")
 

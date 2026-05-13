@@ -1,284 +1,227 @@
-# Operation Manager
+# Operation Dispatcher
 
-## Introduction
+Operation Dispatcher is a lightweight Python package for queueing, dispatching, and supervising operations for a single resource (for example a robot, station, or machine).
 
-Operation Manager is a lightweight Python library for managing and executing operations.
+It is organized in three layers:
 
-In a shopfloor environment, each asset can have its own independent operation schedule.
-An asset could be a mobile robot, a conveyor segment, a test station, or any other controllable unit.
+1. `DispatchQueue`: ordering, pull, cancel, and completion history.
+2. `OperationDispatcher`: runtime loop, request handshake, lifecycle transitions, and execution state.
+3. `OperationDispatcherOpenAPI`: Flask + Flasgger adapter exposing documented HTTP endpoints.
 
-Each asset receives an ordered list of operations that defines what it should do next.
+## Highlights
 
-As a concrete example, consider a warehouse mobile robot moving pallets between inbound, storage, and outbound areas.
-An **operation** is one unit of work for that robot, for example:
-
-- `pickup_pallet` from station A
-- `move_to_buffer_zone` with a target waypoint
-- `dropoff_pallet` at station B
-- `go_charge` when battery is below threshold
-
-An operation **schedule** is the asset's ordered operation backlog, defining *what should run next*.
-
-Operation Manager includes three layers:
-
-1. `Schedule`: a priority-ordered queue with history tracking.
-2. `OperationManager`: runtime execution and lifecycle control (start, complete, fail, stop, cancel, pause, resume).
-3. `OperationManagerOpenAPI`: a Flask + Flasgger adapter to expose the operation manager through documented HTTP endpoints.
-
-This project is useful when you need a small, embeddable operation manager component that can run standalone in Python code or be integrated into a larger service/API.
-
-## Key Features
-
-- Out-of-the-box runtime execution
-- Provide your own operation payload
-- Easily integrated through event callbacks
-- Default OpenAPI interface
-- Request-handshake control with explicit allow/deny semantics
-- Retry, cooldown, and auto-pause behavior for denied requests
-- Built-in runtime controls (`start`, `stop`, `pause`, `resume`)
-- Queue history and runtime state introspection endpoints
-- Implemented in pure Python with only `pydantic` as a runtime dependency
+- Typed models with Pydantic v2.
+- Custom operation schema via `operation_model`.
+- Request/notification callback split.
+- Retry/cooldown policy for denied start requests.
+- Runtime controls: start, stop, pause, resume.
+- OpenAPI endpoints for queue/history/current/next/add/cancel/state.
 
 ## Installation
 
+Base package:
+
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
+pip install -e .
+```
+
+With tests/dev tools:
+
+```bash
 pip install -e .[dev]
 ```
 
-For API integration:
+With Flask + Flasgger API extras:
 
 ```bash
 pip install -e .[api]
 ```
 
-## Schedule Model
+## Core Models
 
-A `Schedule` is a priority queue with history tracking.
+- `Operation`: base operation model (subclass this for app-specific fields).
+- `ScheduledOperation`: operation + dispatch metadata (`resource_id`, `priority`, dates).
+- `OperationExecution`: runtime execution state and outcome metadata.
+- `DispatchEvent` with `EventType`: emitted for lifecycle/runtime/request flow.
 
-### Operation types
+## Dispatch Queue
 
-- **All operations** use `Operation`.
-- Optional scheduling windows are expressed via `time_window` (`TimeWindow(start, end)`).
+`DispatchQueue` stores scheduled operations for one `resource_id`.
 
-All operations share status fields like `lifecycle_status`, `execution_outcome`, `termination_reason`, plus execution timestamps (`start_time`, `finish_time`).
+Key behavior:
 
-### Queue behavior
+- Keeps one active pulled operation at a time.
+- Supports `add`, `peek`, `next`, `complete`, `cancel`, `remove`.
+- Tracks completion history via `history(limit=...)` (newest first).
+- Supports ordering strategies:
+  - `SortStrategy.RELEASE_DATE_THEN_PRIORITY` (default)
+  - `SortStrategy.PRIORITY_THEN_RELEASE_DATE`
 
-- The first added operation locks the queue type:
-	- plain queue: operations must not have `time_window`
-	- windowed queue: operations must have `time_window`
-- Mixed queues are rejected (`Operation` entries must match the locked queue type).
-- Plain queues are ordered by `priority` (higher value first).
-- Windowed queues are ordered by `time_window.start`, then `priority`.
-- `peek()` returns the next queued operation without removing it.
-- `next()` pulls the first queued operation, marks it as running, and sets `start_time`.
-- Completed operations are available through history (`history(limit=...)`, newest first).
+## Dispatcher Runtime
 
-## Operation Manager
+`OperationDispatcher` coordinates queue + execution state.
 
-`OperationManager` drives execution by repeatedly checking the schedule in an async loop.
-At a high level, each loop iteration does the following:
+Runtime flow (`run_once`):
 
-1. Skip if paused or if an operation is already running.
-2. Peek the next queued operation.
-3. Verify time-window constraints (if configured).
-4. Execute the start handshake (`OPERATION_START_REQUESTED` then `OPERATION_START_DISPATCH_REQUESTED`).
-5. Start the operation when both handshake steps are explicitly allowed.
+1. Skip if paused or a current operation already exists.
+2. Peek next queued operation.
+3. Honor `release_date` if set.
+4. Emit and evaluate start request events.
+5. Start operation only when request checks are allowed.
 
-This keeps scheduling and execution control separate: `Schedule` decides order, while `OperationManager` decides when and whether execution may proceed.
+Callbacks:
 
-### Event callback integration
+- `on_request_callback`: handles `*_REQUESTED` events and should return explicit `True` to allow progression.
+- `on_notification_callback`: receives non-request events (best effort).
 
-`OperationManager` now separates callback responsibilities:
+Important constructor options:
 
-- `on_request_callback`: is expected to handle `*_REQUESTED` decision events and must return explicit `True` to allow progress.
-- `on_notification_callback`: receives non-request lifecycle/runtime events in a best-effort way.
+- `operation_model`
+- `poll_interval_seconds`
+- `start_request_max_retries`
+- `start_request_retry_cooldown_seconds`
+- `request_event_timeout_seconds`
+- `dispatch_queue_sort_strategy`
 
-Typical responsibilities include:
+## Quickstart
 
-- publishing operation/runtime events to Kafka or another message bus
-- writing operation state transitions to a database
-- triggering external orchestration logic (e.g., robot middleware, task dispatch services)
-- running policy checks for request events (`OPERATION_START_REQUESTED`, `OPERATION_START_DISPATCH_REQUESTED`, `OPERATION_CANCEL_REQUESTED`, `OPERATION_STOP_REQUESTED`, `OPERATION_RESUME_REQUESTED`)
-
-In other words, `OperationManager` provides execution flow and event emission, while the callback connects that flow to your own infrastructure and business logic.
-
-### Events
-
-`OperationManager` is event-driven. Events are emitted for lifecycle transitions, runtime control, and start handshakes.
-
-#### Event groups
-
-- **Runtime events**: `OPERATION_MANAGER_STARTED`, `OPERATION_MANAGER_STOPPED`, `OPERATION_MANAGER_PAUSED`, `OPERATION_MANAGER_RESUMED`
-- **Operation lifecycle events**: `OPERATION_ADDED`, `OPERATION_STARTED`, `OPERATION_FAILED`, `OPERATION_STOPPED`, `OPERATION_CANCELLED`, `OPERATION_COMPLETED`
-- **Request events**: `OPERATION_START_REQUESTED`, `OPERATION_START_DISPATCH_REQUESTED`, `OPERATION_CANCEL_REQUESTED`, `OPERATION_STOP_REQUESTED`, `OPERATION_RESUME_REQUESTED`
-- **Request denied events**: `OPERATION_START_DENIED`, `OPERATION_START_DISPATCH_DENIED`, `OPERATION_CANCEL_DENIED`, `OPERATION_STOP_DENIED`, `OPERATION_RESUME_DENIED`
-
-#### Start handshake behavior
-
-Before an operation starts, `run_once()` emits `OPERATION_START_REQUESTED`.
-If `on_request_callback` is configured, it must return explicit `True` to allow progress.
-If denied (or not explicitly `True`), a corresponding denied event is emitted:
-
-- `OPERATION_START_DENIED`
-- `OPERATION_START_DISPATCH_DENIED`
-- `OPERATION_CANCEL_DENIED`
-- `OPERATION_STOP_DENIED`
-- `OPERATION_RESUME_DENIED`
-
-Then retry behavior is controlled by:
-
-- `start_request_retry_cooldown_seconds`: wait before asking again
-- `start_request_max_retries`: max denied attempts before auto-pause
-
-After the start request is allowed, `OPERATION_START_DISPATCH_REQUESTED` is emitted so the higher-level system can dispatch execution.
-That dispatch request also expects explicit `True` when a callback is configured.
-
-## Example 1: Plain Schedule
-
-Use `Schedule` when you only want queue behavior and do not need runtime execution.
+### 1) Queue only
 
 ```python
-from operation_manager import Operation, Schedule
+from operation_dispatcher import DispatchQueue, Operation, ScheduledOperation
 
-schedule = Schedule(agent_id="agent-1")
 
-schedule.add(Operation(name="move_to_station", agent_id="agent-1", priority=5))
-schedule.add(Operation(name="return_to_charging", agent_id="agent-1", priority=1))
+class WarehouseOperation(Operation):
+	name: str
+	source_station: str
+	target_station: str
 
-next_operation = schedule.peek()  # highest-priority next item
-queued_operations = schedule.list()
 
-print(next_operation)
-print(len(queued_operations))
+dispatch_queue = DispatchQueue(resource_id="robot-1")
+dispatch_queue.add(
+	ScheduledOperation(
+		operation=WarehouseOperation(
+			name="move_to_station_1",
+			source_station="INBOUND_A",
+			target_station="BUFFER_01",
+		),
+		resource_id="robot-1",
+		priority=10,
+	)
+)
+
+next_op = dispatch_queue.peek()
+print(next_op)
 ```
 
-## Example 2: Operation Manager Runtime
-
-Use `OperationManager` when operations should execute automatically in an async loop.
+### 2) Dispatcher runtime
 
 ```python
 import asyncio
-from operation_manager import Operation, OperationManager, OperationManagerEventType
+from operation_dispatcher import DispatchEvent, EventType, Operation, OperationDispatcher, ScheduledOperation
 
 
-def on_request(event):
-	# react on emitted request events
-	if event.event_type is OperationManagerEventType.OPERATION_START_REQUESTED:
-		# higher-level admission control
+class WarehouseOperation(Operation):
+	name: str
+	task: str
+
+
+def on_request(event: DispatchEvent) -> bool | None:
+	if event.event_type is EventType.OPERATION_START_REQUESTED:
 		return True
-
-	if event.event_type is OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED:
-		print(f"Dispatch operation {event.operation_name} ({event.operation_id})")
-		return True
-
-
-def on_notification(event):
-	# react on all other types of events
-	if event.event_type is OperationManagerEventType.OPERATION_CANCELLED:
-		print(f"Cancel operation {event.operation_name} ({event.operation_id})")
+	return None
 
 
 async def main() -> None:
-	operation_manager = OperationManager(
-		agent_id="agent-1",
+	dispatcher = OperationDispatcher(
+		resource_id="robot-1",
+		operation_model=WarehouseOperation,
 		on_request_callback=on_request,
-		on_notification_callback=on_notification,
-		poll_interval_seconds=0.1,
-		start_request_max_retries=3,
-		start_request_retry_cooldown_seconds=1.0,
 	)
 
-	operation_manager.add(Operation(name="move_to_station", agent_id="agent-1", priority=5))
-	operation_manager.add(Operation(name="wait_for_operator", agent_id="agent-1", priority=5))
+	dispatcher.add(
+		ScheduledOperation(
+			operation=WarehouseOperation(name="move", task="pickup"),
+			resource_id="robot-1",
+			priority=10,
+		)
+	)
 
-	runtime_task = asyncio.create_task(operation_manager.run())
-	await asyncio.sleep(2)
-
-	operation_manager.request_stop()
+	runtime_task = asyncio.create_task(dispatcher.run())
+	await asyncio.sleep(1.0)
+	dispatcher.request_stop()
 	await runtime_task
 
 
 asyncio.run(main())
 ```
 
-## Example 3: Operation Manager with API (Flask + Flasgger)
-
-Use `OperationManagerOpenAPI` when you want HTTP endpoints plus Swagger UI/OpenAPI definitions.
+### 3) OpenAPI adapter
 
 ```python
 from flask import Flask
 from flasgger import Swagger
-from pydantic import BaseModel
-
-from operation_manager import OperationManager, OperationManagerOpenAPI
-
-
-class OperationPayloadModel(BaseModel):
-	task: str
-	retries: int = 0
+from operation_dispatcher import OperationDispatcher, OperationDispatcherOpenAPI
 
 
 app = Flask(__name__)
+dispatcher = OperationDispatcher(resource_id="robot-1")
+dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
-operation_manager = OperationManager(agent_id="agent-1", payload_model=OperationPayloadModel)
-operation_manager_api = OperationManagerOpenAPI(operation_manager)
+Swagger(
+	app,
+	template={
+		"swagger": "2.0",
+		"info": {"title": "Operation Dispatcher API", "version": "1.0.0"},
+		"definitions": dispatcher_api.get_openapi_definitions(),
+	},
+)
 
-swagger_template = {
-	"swagger": "2.0",
-	"info": {"title": "Operation Manager API", "version": "1.0.0"},
-	"definitions": operation_manager_api.get_openapi_definitions(),
-}
-Swagger(app, template=swagger_template)
-
-operation_manager_api.register_default_endpoints(app)
+dispatcher_api.register_default_endpoints(app)
 ```
 
-Start and lifecycle behavior is event-driven; see the **Events** section above for the full handshake and retry semantics.
+## Default OpenAPI Endpoints
 
-When a `payload_model` is configured, `AddOperationRequest.payload` and `ScheduledOperation.payload`
-are represented as a real OpenAPI model reference (`$ref`) in `definitions`.
+#### Operation Dispatcher
+- `GET /operation_dispatcher/queue`
+- `GET /operation_dispatcher/history` (`limit` query parameter, default `50`, max `1000`)
+- `GET /operation_dispatcher/next`
+- `POST /operation_dispatcher/add`
+- `POST /operation_dispatcher/cancel`
+- `GET /operation_dispatcher/current_operation`
+- `POST /operation_dispatcher/current_operation/cancel`
+- `POST /operation_dispatcher/current_operation/stop`
+- `POST /operation_dispatcher/current_operation/resume`
 
-### Default API endpoints
+#### Operation Dispatcher Runtime
 
-- `GET /operation_manager/schedule`
-- `GET /operation_manager/history` (supports `limit`, default `50`, max `1000`)
-- `GET /operation_manager/current_operation`
-- `GET /operation_manager/next_operation`
-- `POST /operation_manager/add_operation`
-- `POST /operation_manager/cancel_operation`
-- `POST /operation_manager/cancel_current_operation`
-- `POST /operation_manager/stop_current_operation`
-- `POST /operation_manager/resume_current_operation`
-- `GET /operation_manager/state`
-- `POST /operation_manager/start`
-- `POST /operation_manager/stop`
-- `POST /operation_manager/pause`
-- `POST /operation_manager/resume`
+- `GET /operation_dispatcher/state`
+- `POST /operation_dispatcher/start`
+- `POST /operation_dispatcher/stop`
+- `POST /operation_dispatcher/pause`
+- `POST /operation_dispatcher/resume`
 
-## Included example apps
+## Included Examples
 
-1. Plain Schedule
+- Queue-only example:
 
 ```bash
-python examples/plain_schedule_example.py
+python examples/dispatch_queue.py
 ```
 
-2. OperationManager with callbacks
+- Dispatcher callback/runtime example:
 
 ```bash
-python examples/operation_manager_callbacks_example.py
+python examples/dispatcher.py
 ```
 
-3. OperationManager integrated in OpenAPI app (Flask + Flasgger)
+- Flask + OpenAPI demo:
 
 ```bash
-python examples/flask_operation_manager_app.py
+python examples/dispatcher_openapi.py
 ```
 
 Then open:
 
-- `http://localhost:8000/docs/`
-- `http://localhost:8000/openapi.json`
+- http://localhost:8000/docs/
+- http://localhost:8000/openapi.json

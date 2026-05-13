@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "operation-manager"
+name = "operation-dispatcher"
 version = "0.1.0"
-description = "Lightweight operation manager package for managing and executing operations"
+description = "Lightweight operation dispatcher package for managing and executing operations"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

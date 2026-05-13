@@ -10,13 +10,14 @@ from flask import Flask, jsonify
 from flasgger import Swagger
 from pydantic import BaseModel, Field
 
-from operation_manager import (
+from operation_dispatcher import (
+    DispatchEvent,
+    EventType,
     Operation,
-    OperationManager,
-    OperationManagerEventType,
-    OperationManagerOpenAPI,
+    OperationDispatcher,
+    OperationDispatcherOpenAPI,
+    ScheduledOperation,
 )
-from operation_manager.models import OperationManagerEvent
 
 
 class ExampleOperationPayload(BaseModel):
@@ -25,6 +26,11 @@ class ExampleOperationPayload(BaseModel):
     pallet_id: str
     retries: int = 0
     run_seconds: float = Field(default=5.0, gt=0)
+
+
+class WarehouseOperation(Operation):
+    name: str
+    payload: ExampleOperationPayload
 
 
 class SimulatedOperationRunner:
@@ -143,7 +149,7 @@ class SimulatedOperationRunner:
             return
 
 
-class DemoAgentService:
+class DemoDispatcherService:
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self._logger = logger
         self._start_attempts: dict[UUID, int] = {}
@@ -152,81 +158,79 @@ class DemoAgentService:
             logger=logger,
         )
 
-        self.operation_manager = OperationManager(
-            agent_id="agent-1",
+        self.operation_dispatcher = OperationDispatcher(
+            resource_id="robot-1",
+            operation_model=WarehouseOperation,
             on_request_callback=self._on_request_handler,
             on_notification_callback=self._on_notification_handler,
             start_request_max_retries=3,
             start_request_retry_cooldown_seconds=1.0,
             request_event_timeout_seconds=2.0,
-            payload_model=ExampleOperationPayload,
             logger=logger,
         )
 
-        self.operation_manager.add(
-            Operation(
-                name="pickup_pallet",
-                agent_id="agent-1",
+        self.operation_dispatcher.add(
+            ScheduledOperation(
+                operation=WarehouseOperation(
+                    name="pickup_pallet",
+                    payload=ExampleOperationPayload(
+                        source_station="INBOUND_A",
+                        target_station="BUFFER_01",
+                        pallet_id="PALLET-1001",
+                        run_seconds=8.0,
+                    ),
+                ),
+                resource_id="robot-1",
                 priority=10,
-                payload=ExampleOperationPayload(
-                    source_station="INBOUND_A",
-                    target_station="BUFFER_01",
-                    pallet_id="PALLET-1001",
-                    run_seconds=8.0,
-                ).model_dump(),
             )
         )
-        self.operation_manager.add(
-            Operation(
-                name="dropoff_pallet",
-                agent_id="agent-1",
+        self.operation_dispatcher.add(
+            ScheduledOperation(
+                operation=WarehouseOperation(
+                    name="dropoff_pallet",
+                    payload=ExampleOperationPayload(
+                        source_station="BUFFER_01",
+                        target_station="OUTBOUND_B",
+                        pallet_id="PALLET-1001",
+                        run_seconds=6.0,
+                    ),
+                ),
+                resource_id="robot-1",
                 priority=5,
-                payload=ExampleOperationPayload(
-                    source_station="BUFFER_01",
-                    target_station="OUTBOUND_B",
-                    pallet_id="PALLET-1001",
-                    run_seconds=6.0,
-                ).model_dump(),
             )
         )
 
-    def _on_request_handler(self, event: OperationManagerEvent) -> bool | None:
-        if event.event_type is OperationManagerEventType.OPERATION_START_REQUESTED:
+    def _on_request_handler(self, event: DispatchEvent) -> bool | None:
+        if event.event_type is EventType.OPERATION_START_REQUESTED:
             return self._allow_start_with_one_initial_denial(event)
 
-        if (
-            event.event_type
-            is OperationManagerEventType.OPERATION_START_DISPATCH_REQUESTED
-        ):
-            return True
-
-        if event.event_type is OperationManagerEventType.OPERATION_CANCEL_REQUESTED:
+        if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
             operation_id = event.operation_id
             if operation_id is not None:
                 self._simulated_runner.cancel(operation_id)
                 return True
 
-        if event.event_type is OperationManagerEventType.OPERATION_STOP_REQUESTED:
-            current = self.operation_manager.current_operation
+        if event.event_type is EventType.OPERATION_STOP_REQUESTED:
+            current = self.operation_dispatcher.current_scheduled_operation
             if current is not None:
-                self._simulated_runner.pause(current.id)
+                self._simulated_runner.pause(current.operation.id)
                 return False
 
-        if event.event_type is OperationManagerEventType.OPERATION_RESUME_REQUESTED:
-            current = self.operation_manager.current_operation
+        if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
+            current = self.operation_dispatcher.current_scheduled_operation
             if current is not None:
-                self._simulated_runner.resume(current.id)
+                self._simulated_runner.resume(current.operation.id)
             return True
 
         return None
 
-    def _on_notification_handler(self, event: OperationManagerEvent) -> None:
-        if event.event_type is OperationManagerEventType.OPERATION_STARTED:
+    def _on_notification_handler(self, event: DispatchEvent) -> None:
+        if event.event_type is EventType.OPERATION_STARTED:
             operation_id = event.operation_id
             if operation_id is not None:
                 self._simulate_operation_run(operation_id)
 
-        if event.event_type is OperationManagerEventType.OPERATION_START_DENIED:
+        if event.event_type is EventType.OPERATION_START_DENIED:
             if self._logger is not None:
                 self._logger.info(
                     "start denied for operation %s with metadata=%s",
@@ -234,23 +238,21 @@ class DemoAgentService:
                     event.data,
                 )
 
-        if event.event_type is OperationManagerEventType.OPERATION_CANCELLED:
+        if event.event_type is EventType.OPERATION_CANCELLED:
             operation_id = event.operation_id
             if operation_id is not None:
                 self._simulated_runner.cancel(operation_id)
 
         if event.event_type in {
-            OperationManagerEventType.OPERATION_COMPLETED,
-            OperationManagerEventType.OPERATION_FAILED,
-            OperationManagerEventType.OPERATION_STOPPED,
+            EventType.OPERATION_COMPLETED,
+            EventType.OPERATION_FAILED,
+            EventType.OPERATION_STOPPED,
         }:
             operation_id = event.operation_id
             if operation_id is not None:
                 self._simulated_runner.cancel(operation_id)
 
-    def _allow_start_with_one_initial_denial(
-        self, event: OperationManagerEvent
-    ) -> bool:
+    def _allow_start_with_one_initial_denial(self, event: DispatchEvent) -> bool:
         operation_id = event.operation_id
         if operation_id is None:
             return False
@@ -273,40 +275,36 @@ class DemoAgentService:
         self._simulated_runner.start(operation_id, delay_seconds)
 
     def _complete_operation_if_current(self, operation_id: UUID) -> None:
-        current = self.operation_manager.current_operation
-        if current is not None and current.id == operation_id:
-            self.operation_manager.complete_current()
+        current = self.operation_dispatcher.current_scheduled_operation
+        if current is not None and current.operation.id == operation_id:
+            self.operation_dispatcher.complete_current()
 
     def _resolve_simulated_run_seconds(self, operation_id: UUID) -> float:
-        current = self.operation_manager.current_operation
-        if current is None or current.id != operation_id:
+        current = self.operation_dispatcher.current_scheduled_operation
+        if current is None or current.operation.id != operation_id:
             return 5.0
 
-        payload = current.payload
-        run_seconds = payload.get("run_seconds")
-        if isinstance(run_seconds, (int, float)) and run_seconds > 0:
+        run_seconds = current.operation.payload.run_seconds
+        if run_seconds > 0:
             return float(run_seconds)
 
         return 5.0
 
     def create_app(self) -> Flask:
-        app = Flask(
-            __name__,
-            static_url_path="/app_static",
-        )
+        app = Flask(__name__, static_url_path="/app_static")
 
-        operation_manager_api = OperationManagerOpenAPI(
-            self.operation_manager,
+        operation_dispatcher_api = OperationDispatcherOpenAPI(
+            self.operation_dispatcher,
         )
 
         swagger_template = {
             "swagger": "2.0",
             "info": {
-                "title": "Operation Manager API",
+                "title": "Operation Dispatcher API",
                 "version": "1.0.0",
-                "description": "Example Flask API exposing operation manager endpoints.",
+                "description": "Example Flask API exposing operation dispatcher endpoints.",
             },
-            "definitions": operation_manager_api.get_openapi_definitions(),
+            "definitions": operation_dispatcher_api.get_openapi_definitions(),
         }
         swagger_config = {
             "headers": [],
@@ -329,31 +327,34 @@ class DemoAgentService:
             return (
                 jsonify(
                     {
-                        "message": "Operation Manager Flask + OpenAPI demo",
+                        "message": "Operation Dispatcher Flask + OpenAPI demo",
                         "notes": {
                             "start_handshake": "first start request for each operation is denied once to demonstrate retry/cooldown",
-                            "completion": "operations are auto-completed after payload.run_seconds (default 5.0s)",
-                            "simulation": "a dedicated simulated worker thread supports true pause/resume for stop_current_operation and resume_current_operation",
+                            "completion": "operations are auto-completed after operation.payload.run_seconds (default 5.0s)",
+                            "simulation": "a dedicated simulated worker thread supports true pause/resume for /operation_dispatcher/current_operation/stop and /operation_dispatcher/current_operation/resume",
                         },
                         "docs": "/docs/",
                         "openapi": "/openapi.json",
-                        "schedule": "/operation_manager/schedule",
-                        "history": "/operation_manager/history",
-                        "get_current_operation": "/operation_manager/current_operation",
-                        "get_next_operation": "/operation_manager/next_operation",
-                        "add_operation": "/operation_manager/add_operation",
-                        "cancel_operation": "/operation_manager/cancel_operation",
-                        "get_operation_manager_state": "/operation_manager/state",
-                        "start": "/operation_manager/start",
-                        "stop": "/operation_manager/stop",
-                        "pause": "/operation_manager/pause",
-                        "resume": "/operation_manager/resume",
+                        "queue": "/operation_dispatcher/queue",
+                        "history": "/operation_dispatcher/history",
+                        "get_current_operation": "/operation_dispatcher/current_operation",
+                        "get_next_operation": "/operation_dispatcher/next_operation",
+                        "add_operation": "/operation_dispatcher/add",
+                        "cancel_operation": "/operation_dispatcher/cancel_operation",
+                        "cancel_current_operation": "/operation_dispatcher/current_operation/cancel",
+                        "stop_current_operation": "/operation_dispatcher/current_operation/stop",
+                        "resume_current_operation": "/operation_dispatcher/current_operation/resume",
+                        "get_dispatcher_state": "/operation_dispatcher/state",
+                        "start": "/operation_dispatcher/start",
+                        "stop": "/operation_dispatcher/stop",
+                        "pause": "/operation_dispatcher/pause",
+                        "resume": "/operation_dispatcher/resume",
                     }
                 ),
                 200,
             )
 
-        operation_manager_api.register_default_endpoints(app)
+        operation_dispatcher_api.register_default_endpoints(app)
 
         return app
 
@@ -362,8 +363,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger(__name__)
 
-    demo_agent = DemoAgentService(logger=logger)
-    app = demo_agent.create_app()
+    demo_dispatcher = DemoDispatcherService(logger=logger)
+    app = demo_dispatcher.create_app()
     logger.info("starting Flask demo on http://localhost:8000")
     logger.info("open docs at http://localhost:8000/docs/")
     app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)

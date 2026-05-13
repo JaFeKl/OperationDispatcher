@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from operation_manager import (
+from operation_dispatcher import (
     ExecutionOutcome,
     LifecycleStatus,
     Operation,
@@ -61,7 +61,6 @@ def test_scheduler_run_once_executes_and_completes_operation() -> None:
     assert seen_event_types == [
         SchedulerEventType.OPERATION_ADDED,
         SchedulerEventType.OPERATION_START_REQUESTED,
-        SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
         SchedulerEventType.OPERATION_STARTED,
     ]
     assert scheduler.current_operation is operation
@@ -230,10 +229,7 @@ def test_scheduler_run_once_waits_for_windowed_operation_due_time() -> None:
 def test_scheduler_run_once_supports_async_executor() -> None:
     async def request_and_notification_callback(event) -> bool | None:
         await asyncio.sleep(0)
-        if event.event_type in {
-            SchedulerEventType.OPERATION_START_REQUESTED,
-            SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        }:
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             return True
         return None
 
@@ -260,8 +256,6 @@ def test_scheduler_preserves_executor_set_result_status() -> None:
         nonlocal seen_start_request
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             seen_start_request = True
-            return True
-        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
             return True
         return None
 
@@ -477,10 +471,7 @@ def test_scheduler_run_once_emits_start_requested_event() -> None:
 
     def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
-        if event.event_type in {
-            SchedulerEventType.OPERATION_START_REQUESTED,
-            SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        }:
+        if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             return True
         return None
 
@@ -496,7 +487,6 @@ def test_scheduler_run_once_emits_start_requested_event() -> None:
 
     assert executed is operation
     assert SchedulerEventType.OPERATION_START_REQUESTED in seen_event_types
-    assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED in seen_event_types
 
 
 def test_scheduler_does_not_continue_when_start_request_callback_returns_none() -> None:
@@ -504,8 +494,6 @@ def test_scheduler_does_not_continue_when_start_request_callback_returns_none() 
 
     def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
-        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
-            return True
         return None
 
     scheduler = Scheduler(
@@ -523,7 +511,6 @@ def test_scheduler_does_not_continue_when_start_request_callback_returns_none() 
     assert scheduler.current_operation is None
     assert SchedulerEventType.OPERATION_START_REQUESTED in seen_event_types
     assert SchedulerEventType.OPERATION_START_DENIED in seen_event_types
-    assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED not in seen_event_types
 
 
 def test_scheduler_retries_denied_start_after_cooldown() -> None:
@@ -537,9 +524,6 @@ def test_scheduler_retries_denied_start_after_cooldown() -> None:
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             start_request_calls += 1
             return start_request_calls >= 2
-
-        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
-            return True
 
         return None
 
@@ -571,7 +555,6 @@ def test_scheduler_retries_denied_start_after_cooldown() -> None:
         SchedulerEventType.OPERATION_START_REQUESTED,
         SchedulerEventType.OPERATION_START_DENIED,
         SchedulerEventType.OPERATION_START_REQUESTED,
-        SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
         SchedulerEventType.OPERATION_STARTED,
     ]
 
@@ -653,15 +636,13 @@ def test_scheduler_resume_resets_denied_start_retry_counter() -> None:
     assert start_request_calls == 4
 
 
-def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
+def test_scheduler_starts_when_start_request_is_allowed() -> None:
     seen_event_types: list[SchedulerEventType] = []
 
     def request_and_notification_callback(event) -> bool | None:
         seen_event_types.append(event.event_type)
         if event.event_type is SchedulerEventType.OPERATION_START_REQUESTED:
             return True
-        if event.event_type is SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED:
-            return False
         return None
 
     scheduler = Scheduler(
@@ -674,14 +655,13 @@ def test_scheduler_does_not_start_when_dispatch_request_is_denied() -> None:
 
     executed = asyncio.run(scheduler.run_once())
 
-    assert executed is None
-    assert operation.lifecycle_status is LifecycleStatus.QUEUED
-    assert scheduler.current_operation is None
+    assert executed is operation
+    assert operation.lifecycle_status is LifecycleStatus.RUNNING
+    assert scheduler.current_operation is operation
     assert seen_event_types == [
         SchedulerEventType.OPERATION_ADDED,
         SchedulerEventType.OPERATION_START_REQUESTED,
-        SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED,
-        SchedulerEventType.OPERATION_START_DISPATCH_DENIED,
+        SchedulerEventType.OPERATION_STARTED,
     ]
 
 
@@ -711,7 +691,6 @@ def test_scheduler_request_event_callback_timeout_denies_start() -> None:
     assert scheduler.current_operation is None
     assert SchedulerEventType.OPERATION_START_REQUESTED in seen_event_types
     assert SchedulerEventType.OPERATION_START_DENIED in seen_event_types
-    assert SchedulerEventType.OPERATION_START_DISPATCH_REQUESTED not in seen_event_types
 
 
 def test_scheduler_does_not_cancel_when_cancel_request_is_denied() -> None:

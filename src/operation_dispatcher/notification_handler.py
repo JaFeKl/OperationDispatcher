@@ -7,13 +7,13 @@ from collections.abc import Awaitable, Callable
 from typing import cast
 import logging
 
-from .models import OperationManagerEvent
+from .models import DispatchEvent
 
 
 class NotificationHandler:
     def __init__(
         self,
-        on_notification_callback: Callable[[OperationManagerEvent], object] | None,
+        on_notification_callback: Callable[[DispatchEvent], object] | None,
         runtime_loop_getter: Callable[[], asyncio.AbstractEventLoop | None],
         logger: logging.Logger | None = None,
     ) -> None:
@@ -21,7 +21,7 @@ class NotificationHandler:
         self._runtime_loop_getter = runtime_loop_getter
         self._logger = logger
 
-    def notify(self, event: OperationManagerEvent) -> None:
+    def notify(self, event: DispatchEvent) -> None:
         if self._on_notification_callback is None:
             return
 
