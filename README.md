@@ -1,6 +1,6 @@
 # Operation Dispatcher
 
-Operation Dispatcher is a lightweight Python package for queueing, dispatching, and supervising operations for a single resource (for example a robot, station, or machine).
+Operation Dispatcher is a lightweight Python package for managing dispatching, execution and supervising of queued operations for a single resource (for example a robot, station, or machine). A typical motivating example is a mobile robot that receives transport jobs, waits until each job is released, asks an external controller whether it may start, and then reports lifecycle updates such as started, paused, stopped, cancelled, or completed.
 
 It is organized in three layers:
 
@@ -37,11 +37,11 @@ With Flask + Flasgger API extras:
 pip install -e .[api]
 ```
 
-## Core Models
+## Core Data Models
 
 - `Operation`: base operation model (subclass this for app-specific fields).
-- `ScheduledOperation`: operation + dispatch metadata (`resource_id`, `priority`, dates).
-- `OperationExecution`: runtime execution state and outcome metadata.
+- `ScheduledOperation`: operation + dispatch metadata.
+- `OperationExecution`: runtime execution state and outcome metadata, references a ScheduledOperation.
 - `DispatchEvent` with `EventType`: emitted for lifecycle/runtime/request flow.
 
 ## Dispatch Queue
@@ -59,29 +59,71 @@ Key behavior:
 
 ## Dispatcher Runtime
 
-`OperationDispatcher` coordinates queue + execution state.
+`OperationDispatcher` coordinates queue state, execution state, request/deny handling, and runtime wakeups.
 
-Runtime flow (`run_once`):
+### Inner loop behavior
 
-1. Skip if paused or a current operation already exists.
-2. Peek next queued operation.
-3. Honor `release_date` if set.
-4. Emit and evaluate start request events.
-5. Start operation only when request checks are allowed.
+When `run()` is started, the dispatcher:
+
+1. switches its runtime state to running,
+2. stores the current event loop and a wakeup event,
+3. emits `OPERATION_MANAGER_STARTED`,
+4. repeatedly executes `run_once()` until `request_stop()` is called.
+
+Inside each `run_once()` iteration, the dispatcher performs these checks in order:
+
+1. **Pause / active-operation guard**: if the dispatcher is paused, or if one operation is already pulled and active, the iteration does nothing.
+2. **Peek the next queued operation**: the dispatcher looks at the first queue entry without removing it.
+3. **Release-date gate**: if that operation has a future `release_date`, the iteration stops and waits until that time.
+4. **Retry cooldown gate**: if a previous start request for that operation was denied and the retry cooldown is still active, the iteration stops and waits until the cooldown expires.
+5. **Emit and resolve the start request**: the dispatcher creates `OPERATION_START_REQUESTED` and invokes `on_request_callback`.
+6. **Handle denial**: if the callback denies the request, the dispatcher records the decision, emits `OPERATION_START_DENIED`, and updates retry state. After the configured number of denied retries is exhausted, the dispatcher pauses itself.
+7. **Pull the operation from the queue**: only after approval does the dispatcher call `DispatchQueue.next()`.
+8. **Create running execution state**: the matching `OperationExecution` is marked `RUNNING`, and `start_time` is set if it was not already set.
+9. **Emit start notification**: the dispatcher emits `OPERATION_STARTED`.
 
 Callbacks:
 
 - `on_request_callback`: handles `*_REQUESTED` events and should return explicit `True` to allow progression.
 - `on_notification_callback`: receives non-request events (best effort).
 
-Important constructor options:
+## Event Types
 
-- `operation_model`
-- `poll_interval_seconds`
-- `start_request_max_retries`
-- `start_request_retry_cooldown_seconds`
-- `request_event_timeout_seconds`
-- `dispatch_queue_sort_strategy`
+`DispatchEvent` instances are emitted for runtime lifecycle, request handshakes, and operation lifecycle transitions.
+
+### Manager lifecycle events
+
+- `OPERATION_MANAGER_STARTED`: emitted when `run()` enters its main loop.
+- `OPERATION_MANAGER_STOPPED`: emitted when the runtime loop exits and dispatcher state is cleaned up.
+- `OPERATION_MANAGER_PAUSED`: emitted when the dispatcher is paused manually or after too many denied retries.
+- `OPERATION_MANAGER_RESUMED`: emitted after a successful resume and, if applicable, resume request approval.
+
+### Request events
+
+- `OPERATION_START_REQUESTED`: asks whether the next queued operation may begin.
+- `OPERATION_START_DENIED`: indicates that a start request was denied; event metadata includes retry information and optionally the denial reason.
+- `OPERATION_CANCEL_REQUESTED`: asks whether a queued or active operation may be cancelled.
+- `OPERATION_CANCEL_DENIED`: indicates that a cancel request was denied.
+- `OPERATION_STOP_REQUESTED`: asks whether the current active operation may be stopped.
+- `OPERATION_STOP_DENIED`: indicates that a stop request was denied.
+- `OPERATION_RESUME_REQUESTED`: asks whether a paused current operation, or the paused dispatcher, may resume.
+- `OPERATION_RESUME_DENIED`: indicates that a resume request was denied.
+
+### Operation lifecycle events
+
+- `OPERATION_ADDED`: emitted when a scheduled operation is inserted into the queue and execution tracking is created.
+- `OPERATION_STARTED`: emitted after the operation is pulled from the queue and marked running.
+- `OPERATION_COMPLETED`: emitted when the current operation finishes successfully.
+- `OPERATION_FAILED`: emitted when the current operation is marked failed because of an internal failure path.
+- `OPERATION_STOPPED`: emitted when the current operation is stopped after a successful stop request.
+- `OPERATION_CANCELLED`: emitted when an operation is cancelled, whether it was still queued or already active.
+
+### How to interpret them
+
+- `*_REQUESTED` events are the handshake points where business logic decides whether the dispatcher may proceed.
+- `*_DENIED` events are feedback that the handshake rejected the action; for start requests they also drive retry/cooldown behavior.
+- manager events describe the dispatcher runtime itself,
+- operation lifecycle events describe what happened to a specific scheduled operation.
 
 ## Quickstart
 
