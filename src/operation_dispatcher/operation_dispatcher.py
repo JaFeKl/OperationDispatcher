@@ -6,19 +6,20 @@ import queue
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any
 from uuid import UUID
 
 from .dispatch_queue import DispatchQueue, SortRule
 from .models import (
     DispatchEvent,
+    EventData,
     EventType,
     ExecutionOutcome,
     ExecutionState,
+    OperationHistoryEntry,
     Operation,
     OperationExecution,
-    OperationManagerState,
+    OperationDispatcherState,
     RequestDecision,
     ScheduledOperation,
     TerminationReason,
@@ -26,12 +27,6 @@ from .models import (
 from .notification_handler import NotificationHandler
 from .request_handler import RequestHandler
 from .retry_policy import RetryPolicy
-
-
-class _DispatcherRuntimeState(str, Enum):
-    STOPPED = "stopped"
-    RUNNING = "running"
-    STOPPING = "stopping"
 
 
 class OperationDispatcher:
@@ -79,13 +74,13 @@ class OperationDispatcher:
             sort_rules=dispatch_queue_sort_rules,
         )
         self._executions_by_operation_id: dict[UUID, OperationExecution] = {}
+        self._events_by_operation_id: dict[UUID, list[DispatchEvent]] = {}
 
         request_retry_policy = RetryPolicy(
             max_retries=start_request_max_retries,
             retry_cooldown_seconds=start_request_retry_cooldown_seconds,
         )
 
-        self._runtime_state = _DispatcherRuntimeState.STOPPED
         self._is_paused = False
         self._stop_requested = False
         self._poll_interval_seconds = poll_interval_seconds
@@ -105,6 +100,7 @@ class OperationDispatcher:
             request_retry_policy=request_retry_policy,
             request_event_timeout_seconds=request_event_timeout_seconds,
             append_event_history=self._append_event_history,
+            append_operation_event=self._append_operation_event,
             emit_event=self._emit_event,
             log_event=self._log_event,
             notify_wakeup=self._notify_wakeup,
@@ -113,10 +109,6 @@ class OperationDispatcher:
 
     @property
     def dispatch_queue(self) -> DispatchQueue:
-        return self._dispatch_queue
-
-    @property
-    def schedule(self) -> DispatchQueue:
         return self._dispatch_queue
 
     @property
@@ -143,7 +135,12 @@ class OperationDispatcher:
 
     @property
     def is_running(self) -> bool:
-        return self._runtime_state is not _DispatcherRuntimeState.STOPPED
+        runtime_loop = self._runtime_loop
+        return runtime_loop is not None and runtime_loop.is_running()
+
+    @property
+    def is_stopping(self) -> bool:
+        return self._stop_requested and self.is_running
 
     @property
     def operation_model(self) -> type[Operation]:
@@ -158,6 +155,7 @@ class OperationDispatcher:
         self._executions_by_operation_id[scheduled_operation.operation.id] = (
             OperationExecution(operation_id=scheduled_operation.operation.id)
         )
+        self._events_by_operation_id.setdefault(scheduled_operation.operation.id, [])
         self._emit_event(
             EventType.OPERATION_ADDED,
             scheduled_operation=scheduled_operation,
@@ -169,14 +167,14 @@ class OperationDispatcher:
     def get_execution(self, operation_id: UUID) -> OperationExecution | None:
         return self._executions_by_operation_id.get(operation_id)
 
-    def get_state(self) -> OperationManagerState:
+    def get_state(self) -> OperationDispatcherState:
         now = datetime.now(timezone.utc)
         running_since = self._running_since
         uptime_seconds: float | None = None
         if self.is_running and running_since is not None:
             uptime_seconds = (now - running_since).total_seconds()
 
-        return OperationManagerState(
+        return OperationDispatcherState(
             is_running=self.is_running,
             is_paused=self._is_paused,
             queue_size=len(self._dispatch_queue),
@@ -254,10 +252,9 @@ class OperationDispatcher:
         return self._start_next()
 
     async def run(self) -> None:
-        if self._runtime_state is not _DispatcherRuntimeState.STOPPED:
+        if self.is_running:
             raise RuntimeError("operation dispatcher is already running")
 
-        self._runtime_state = _DispatcherRuntimeState.RUNNING
         self._running_since = datetime.now(timezone.utc)
         self._stop_requested = False
         self._runtime_loop = asyncio.get_running_loop()
@@ -279,7 +276,6 @@ class OperationDispatcher:
 
                 await self._wait_for_next_signal()
         finally:
-            self._runtime_state = _DispatcherRuntimeState.STOPPED
             self._running_since = None
             self._emit_event(EventType.OPERATION_MANAGER_STOPPED)
             self._runtime_loop = None
@@ -290,8 +286,6 @@ class OperationDispatcher:
 
     def _request_stop_internal(self) -> None:
         self._stop_requested = True
-        if self._runtime_state is _DispatcherRuntimeState.RUNNING:
-            self._runtime_state = _DispatcherRuntimeState.STOPPING
         self._notify_wakeup()
 
     def complete_current(self) -> ScheduledOperation:
@@ -330,29 +324,33 @@ class OperationDispatcher:
         )
         return scheduled_operation
 
-    def stop_current(self) -> ScheduledOperation:
-        return self._execute_state_mutation(self._stop_current_internal)
+    def pause_current(self) -> bool:
+        return self._execute_state_mutation(self._pause_current_internal)
 
-    def _stop_current_internal(self) -> ScheduledOperation:
+    def _pause_current_internal(self) -> bool:
         scheduled_operation = self._require_current_scheduled_operation()
+        execution = self._require_execution(scheduled_operation.operation.id)
+        if execution.state is not ExecutionState.RUNNING:
+            raise RuntimeError("current operation is not running")
+
         if not self._request_handler.request_operation_with_retry_sync(
             scheduled_operation,
-            EventType.OPERATION_STOP_REQUESTED,
+            EventType.OPERATION_PAUSE_REQUESTED,
         ):
-            return scheduled_operation
+            return False
 
-        execution = self._require_execution(scheduled_operation.operation.id)
-        execution.state = ExecutionState.STOPPED
-        execution.outcome = ExecutionOutcome.STOPPED
-        execution.termination_reason = TerminationReason.USER_REQUEST
-        execution.finish_time = datetime.now(timezone.utc)
+        self._is_paused = True
+        execution.state = ExecutionState.PAUSED
 
-        self._dispatch_queue.complete(scheduled_operation)
         self._emit_event(
-            EventType.OPERATION_STOPPED,
+            EventType.OPERATION_MANAGER_PAUSED,
             scheduled_operation=scheduled_operation,
         )
-        return scheduled_operation
+        self._emit_event(
+            EventType.OPERATION_PAUSED,
+            scheduled_operation=scheduled_operation,
+        )
+        return True
 
     def request_resume_current(self) -> bool:
         return self._execute_state_mutation(self._request_resume_current_internal)
@@ -368,7 +366,7 @@ class OperationDispatcher:
         return self._execute_state_mutation(lambda: self._cancel_internal(operation_id))
 
     def _cancel_internal(self, operation_id: UUID) -> ScheduledOperation | None:
-        scheduled_operation = self.get_operation(operation_id)
+        scheduled_operation = self.get_scheduled_operation(operation_id)
         if scheduled_operation is None:
             return None
 
@@ -402,13 +400,37 @@ class OperationDispatcher:
             return list(self._event_history)
         return list(self._event_history[-limit:])
 
+    def get_history_entries(
+        self,
+        limit: int | None = None,
+    ) -> list[OperationHistoryEntry]:
+        history_operations = self._dispatch_queue.history(limit=limit)
+        history_entries: list[OperationHistoryEntry] = []
+
+        for scheduled_operation in history_operations:
+            operation_id = scheduled_operation.operation.id
+            execution = self._executions_by_operation_id.get(operation_id)
+            if execution is None:
+                continue
+
+            operation_events = list(self._events_by_operation_id.get(operation_id, []))
+            history_entries.append(
+                OperationHistoryEntry(
+                    scheduled_operation=scheduled_operation,
+                    execution=execution,
+                    events=operation_events,
+                )
+            )
+
+        return history_entries
+
     def _require_current_scheduled_operation(self) -> ScheduledOperation:
         scheduled_operation = self.current_scheduled_operation
         if scheduled_operation is None:
             raise RuntimeError("no current operation")
         return scheduled_operation
 
-    def get_operation(self, operation_id: UUID) -> ScheduledOperation | None:
+    def get_scheduled_operation(self, operation_id: UUID) -> ScheduledOperation | None:
         return self._dispatch_queue.get(operation_id)
 
     async def _wait_for_next_signal(self) -> None:
@@ -463,8 +485,9 @@ class OperationDispatcher:
         self,
         event_type: EventType,
         scheduled_operation: ScheduledOperation | None = None,
-        data: dict[str, Any] | None = None,
+        data: EventData | dict[str, Any] | None = None,
     ) -> DispatchEvent:
+        resolved_data = EventData() if data is None else EventData.model_validate(data)
         event = DispatchEvent(
             event_type=event_type,
             resource_id=(
@@ -477,12 +500,13 @@ class OperationDispatcher:
                 if scheduled_operation is not None
                 else None
             ),
-            data={} if data is None else data,
+            data=resolved_data,
         )
         self._append_event_history(event)
-        self._notification_handler.notify(event)
+        if event.operation_id is not None:
+            self._append_operation_event(event.operation_id, event)
         self._log_event(event)
-
+        self._notification_handler.notify(event)
         self._notify_wakeup()
         return event
 
@@ -490,6 +514,9 @@ class OperationDispatcher:
         self._event_history.append(event)
         if len(self._event_history) > self._event_history_limit:
             self._event_history = self._event_history[-self._event_history_limit :]
+
+    def _append_operation_event(self, operation_id: UUID, event: DispatchEvent) -> None:
+        self._events_by_operation_id.setdefault(operation_id, []).append(event)
 
     def _log_event(self, event: DispatchEvent) -> None:
         if self._logger is None:

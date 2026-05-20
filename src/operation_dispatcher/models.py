@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ExecutionState(str, Enum):
@@ -15,7 +15,6 @@ class ExecutionState(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
-    STOPPED = "STOPPED"
 
 
 class ExecutionOutcome(str, Enum):
@@ -23,7 +22,6 @@ class ExecutionOutcome(str, Enum):
     SUCCESS = "SUCCESS"
     FAILURE = "FAILURE"
     CANCELLED = "CANCELLED"
-    STOPPED = "STOPPED"
 
 
 class TerminationReason(str, Enum):
@@ -45,8 +43,8 @@ class EventType(str, Enum):
     OPERATION_START_DENIED = "operation_start_denied"
     OPERATION_CANCEL_REQUESTED = "operation_cancel_requested"
     OPERATION_CANCEL_DENIED = "operation_cancel_denied"
-    OPERATION_STOP_REQUESTED = "operation_stop_requested"
-    OPERATION_STOP_DENIED = "operation_stop_denied"
+    OPERATION_PAUSE_REQUESTED = "operation_pause_requested"
+    OPERATION_PAUSE_DENIED = "operation_pause_denied"
     OPERATION_RESUME_REQUESTED = "operation_resume_requested"
     OPERATION_RESUME_DENIED = "operation_resume_denied"
 
@@ -54,7 +52,7 @@ class EventType(str, Enum):
     OPERATION_STARTED = "operation_started"
     OPERATION_COMPLETED = "operation_completed"
     OPERATION_FAILED = "operation_failed"
-    OPERATION_STOPPED = "operation_stopped"
+    OPERATION_PAUSED = "operation_paused"
     OPERATION_CANCELLED = "operation_cancelled"
 
 
@@ -64,7 +62,7 @@ class DispatchEvent(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resource_id: str | None = None
     operation_id: UUID | None = None
-    data: dict[str, Any] = Field(default_factory=dict)
+    data: EventData = Field(default_factory=lambda: EventData())
 
 
 class RequestDecision(BaseModel):
@@ -73,12 +71,10 @@ class RequestDecision(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class RequestDecisionRecord(BaseModel):
-    event_type: EventType
-    is_allowed: bool
-    reason: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    decided_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+class EventData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    request_decision: RequestDecision | None = None
 
 
 class Operation(BaseModel):
@@ -103,7 +99,6 @@ class ScheduledOperation(BaseModel):
     planned_duration: timedelta | None = None
     due_date: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    request_decision_history: list[RequestDecisionRecord] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_scheduled_operation(self) -> "ScheduledOperation":
@@ -145,7 +140,13 @@ class OperationExecution(BaseModel):
         return self
 
 
-class OperationManagerState(BaseModel):
+class OperationHistoryEntry(BaseModel):
+    scheduled_operation: ScheduledOperation
+    execution: OperationExecution
+    events: list[DispatchEvent] = Field(default_factory=list)
+
+
+class OperationDispatcherState(BaseModel):
     is_running: bool
     is_paused: bool
     queue_size: int

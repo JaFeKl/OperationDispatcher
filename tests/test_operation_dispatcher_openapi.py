@@ -168,22 +168,12 @@ def test_dispatcher_openapi_runtime_start_stop_and_state() -> None:
     assert "is_running" in state_payload
     assert "queue_size" in state_payload
 
-    pause_payload, pause_status = dispatcher_api.pause_operation_dispatcher_response()
-    assert pause_status == 200
-    assert pause_payload["state"]["is_paused"] is True
-
-    resume_payload, resume_status = (
-        dispatcher_api.resume_operation_dispatcher_response()
-    )
-    assert resume_status == 200
-    assert resume_payload["state"]["is_paused"] is False
-
     stop_payload, stop_status = dispatcher_api.stop_operation_dispatcher_response()
     assert stop_status == 202
     assert stop_payload["state"]["is_running"] is False
 
 
-def test_dispatcher_openapi_runtime_actions_return_409_for_invalid_state() -> None:
+def test_dispatcher_openapi_runtime_stop_returns_409_for_invalid_state() -> None:
     dispatcher = OperationDispatcher(
         resource_id="resource-a",
         operation_model=ExampleOperationModel,
@@ -195,21 +185,11 @@ def test_dispatcher_openapi_runtime_actions_return_409_for_invalid_state() -> No
     assert stop_status == 409
     assert "state" in stop_payload
 
-    pause_payload, pause_status = dispatcher_api.pause_operation_dispatcher_response()
-    assert pause_status == 200
-    assert pause_payload["state"]["is_paused"] is True
-
-    second_pause_payload, second_pause_status = (
-        dispatcher_api.pause_operation_dispatcher_response()
-    )
-    assert second_pause_status == 409
-    assert "state" in second_pause_payload
-
 
 def test_dispatcher_openapi_current_operation_actions() -> None:
-    def deny_stop_and_resume(event) -> bool | None:
+    def deny_pause_and_resume(event) -> bool | None:
         if event.event_type.value in {
-            "operation_stop_requested",
+            "operation_pause_requested",
             "operation_resume_requested",
         }:
             return False
@@ -218,7 +198,7 @@ def test_dispatcher_openapi_current_operation_actions() -> None:
     dispatcher = OperationDispatcher(
         resource_id="resource-a",
         operation_model=ExampleOperationModel,
-        on_request_callback=deny_stop_and_resume,
+        on_request_callback=deny_pause_and_resume,
     )
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
@@ -232,17 +212,17 @@ def test_dispatcher_openapi_current_operation_actions() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    denied_stop_payload, denied_stop_status = (
-        dispatcher_api.stop_current_operation_response()
+    denied_pause_payload, denied_pause_status = (
+        dispatcher_api.pause_current_operation_response()
     )
-    assert denied_stop_status == 409
-    assert denied_stop_payload["code"] == "current_operation_stop_denied"
+    assert denied_pause_status == 409
+    assert denied_pause_payload["code"] == "current_operation_pause_denied"
 
     denied_resume_payload, denied_resume_status = (
         dispatcher_api.resume_current_operation_response()
     )
     assert denied_resume_status == 409
-    assert denied_resume_payload["code"] == "current_operation_resume_denied"
+    assert denied_resume_payload["code"] == "current_operation_not_paused"
 
 
 def test_dispatcher_openapi_register_default_endpoints_exposes_required_routes() -> (
@@ -272,7 +252,7 @@ def test_dispatcher_openapi_register_default_endpoints_exposes_required_routes()
         client.post("/operation_dispatcher/current_operation/cancel").status_code == 404
     )
     assert (
-        client.post("/operation_dispatcher/current_operation/stop").status_code == 404
+        client.post("/operation_dispatcher/current_operation/pause").status_code == 404
     )
     assert (
         client.post("/operation_dispatcher/current_operation/resume").status_code == 404
@@ -330,10 +310,13 @@ def test_dispatcher_openapi_history_response_uses_limit_and_returns_newest_first
     assert status_code == 200
     assert history_payload["limit"] == 1
     assert history_payload["count"] == 1
-    assert history_payload["operations"][0]["operation"]["id"] in {
+    history_entry = history_payload["entries"][0]
+    assert history_entry["scheduled_operation"]["operation"]["id"] in {
         first_id,
         second_id,
     }
+    assert "execution" in history_entry
+    assert "events" in history_entry
 
 
 def test_dispatcher_openapi_specs_include_required_input_parameters() -> None:

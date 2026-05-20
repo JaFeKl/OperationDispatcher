@@ -7,7 +7,8 @@ from operation_dispatcher import (
     ExecutionState,
     Operation,
     OperationDispatcher,
-    OperationManagerState,
+    OperationHistoryEntry,
+    OperationDispatcherState,
     RequestDecision,
     ScheduledOperation,
     TerminationReason,
@@ -183,7 +184,7 @@ def test_dispatcher_get_state_reports_runtime_and_queue_information() -> None:
     dispatcher.add(scheduled_operation)
 
     initial_state = dispatcher.get_state()
-    assert isinstance(initial_state, OperationManagerState)
+    assert isinstance(initial_state, OperationDispatcherState)
     assert initial_state.is_running is False
     assert initial_state.queue_size == 1
     assert initial_state.current_operation is None
@@ -235,12 +236,12 @@ def test_dispatcher_records_runtime_lifecycle_events() -> None:
     assert DispatcherEventType.OPERATION_MANAGER_STOPPED in event_types
 
 
-def test_dispatcher_stop_current_emits_stop_requested_before_stopped() -> None:
+def test_dispatcher_pause_current_emits_pause_requested_before_paused() -> None:
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
-        if event.event_type is DispatcherEventType.OPERATION_STOP_REQUESTED:
+        if event.event_type is DispatcherEventType.OPERATION_PAUSE_REQUESTED:
             return True
         return None
 
@@ -253,13 +254,15 @@ def test_dispatcher_stop_current_emits_stop_requested_before_stopped() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    dispatcher.stop_current()
+    paused = dispatcher.pause_current()
+    assert paused is True
 
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_STARTED,
-        DispatcherEventType.OPERATION_STOP_REQUESTED,
-        DispatcherEventType.OPERATION_STOPPED,
+        DispatcherEventType.OPERATION_PAUSE_REQUESTED,
+        DispatcherEventType.OPERATION_MANAGER_PAUSED,
+        DispatcherEventType.OPERATION_PAUSED,
     ]
 
 
@@ -418,12 +421,45 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
     executed = asyncio.run(dispatcher.run_once())
 
     assert executed is scheduled_operation
-    assert len(scheduled_operation.request_decision_history) == 1
-    decision_record = scheduled_operation.request_decision_history[0]
-    assert decision_record.event_type is DispatcherEventType.OPERATION_START_REQUESTED
-    assert decision_record.is_allowed is True
-    assert decision_record.reason == "policy_allowed"
-    assert decision_record.metadata == {"rule": "start_ok"}
+    request_events = [
+        event
+        for event in dispatcher.get_event_history()
+        if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED
+    ]
+    assert len(request_events) == 1
+    request_event = request_events[0]
+    assert request_event.event_type is DispatcherEventType.OPERATION_START_REQUESTED
+    assert request_event.data.request_decision is not None
+    assert request_event.data.request_decision.is_allowed is True
+    assert request_event.data.request_decision.reason == "policy_allowed"
+    assert request_event.data.request_decision.metadata == {"rule": "start_ok"}
+
+
+def test_dispatcher_history_entries_include_execution_and_events() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    scheduled_operation = _scheduled_operation()
+    dispatcher.add(scheduled_operation)
+    dispatcher._start_next()
+    dispatcher.complete_current()
+
+    entries = dispatcher.get_history_entries(limit=1)
+
+    assert len(entries) == 1
+    history_entry = entries[0]
+    assert isinstance(history_entry, OperationHistoryEntry)
+    assert (
+        history_entry.scheduled_operation.operation.id
+        == scheduled_operation.operation.id
+    )
+    assert history_entry.execution.state is ExecutionState.COMPLETED
+    assert any(
+        event.event_type is DispatcherEventType.OPERATION_STARTED
+        for event in history_entry.events
+    )
+    assert any(
+        event.event_type is DispatcherEventType.OPERATION_COMPLETED
+        for event in history_entry.events
+    )
 
 
 def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
@@ -459,16 +495,17 @@ def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
     ]
     assert len(denied_events) == 1
     denied_event = denied_events[0]
-    assert denied_event.data["reason"] == "resource_busy"
-    assert denied_event.data["decision_metadata"] == {"resource_state": "busy"}
+    denied_data = denied_event.data.model_dump(mode="json")
+    assert denied_data["reason"] == "resource_busy"
+    assert denied_data["decision_metadata"] == {"resource_state": "busy"}
 
 
-def test_dispatcher_does_not_stop_when_stop_request_denied() -> None:
+def test_dispatcher_does_not_pause_when_pause_request_denied() -> None:
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
-        if event.event_type is DispatcherEventType.OPERATION_STOP_REQUESTED:
+        if event.event_type is DispatcherEventType.OPERATION_PAUSE_REQUESTED:
             return False
         return None
 
@@ -481,13 +518,13 @@ def test_dispatcher_does_not_stop_when_stop_request_denied() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    stopped = dispatcher.stop_current()
+    paused = dispatcher.pause_current()
 
-    assert stopped is scheduled_operation
+    assert paused is False
     assert dispatcher.current_scheduled_operation is scheduled_operation
-    assert DispatcherEventType.OPERATION_STOP_REQUESTED in seen_events
-    assert DispatcherEventType.OPERATION_STOP_DENIED in seen_events
-    assert DispatcherEventType.OPERATION_STOPPED not in seen_events
+    assert DispatcherEventType.OPERATION_PAUSE_REQUESTED in seen_events
+    assert DispatcherEventType.OPERATION_PAUSE_DENIED in seen_events
+    assert DispatcherEventType.OPERATION_PAUSED not in seen_events
 
 
 def test_dispatcher_does_not_resume_when_resume_request_denied() -> None:

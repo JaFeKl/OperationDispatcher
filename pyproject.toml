@@ -20,6 +20,9 @@ api = [
   "flask>=3.0,<4.0",
   "flasgger>=0.9.7.1,<1.0",
 ]
+mcp = [
+  "mcp[cli]>=1.9,<2.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

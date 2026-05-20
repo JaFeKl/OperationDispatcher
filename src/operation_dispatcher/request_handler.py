@@ -11,9 +11,9 @@ from uuid import UUID
 
 from .models import (
     DispatchEvent,
+    EventData,
     EventType,
     RequestDecision,
-    RequestDecisionRecord,
     ScheduledOperation,
 )
 from .retry_policy import RetryPolicy
@@ -26,6 +26,7 @@ class RequestHandler:
         request_retry_policy: RetryPolicy,
         request_event_timeout_seconds: float,
         append_event_history: Callable[[DispatchEvent], None],
+        append_operation_event: Callable[[UUID, DispatchEvent], None],
         emit_event: Callable[
             [
                 EventType,
@@ -42,6 +43,7 @@ class RequestHandler:
         self._request_retry_policy = request_retry_policy
         self._request_event_timeout_seconds = request_event_timeout_seconds
         self._append_event_history = append_event_history
+        self._append_operation_event = append_operation_event
         self._emit_event = emit_event
         self._log_event = log_event
         self._notify_wakeup = notify_wakeup
@@ -181,7 +183,7 @@ class RequestHandler:
         denied_event_type_by_requested_event_type = {
             EventType.OPERATION_START_REQUESTED: EventType.OPERATION_START_DENIED,
             EventType.OPERATION_CANCEL_REQUESTED: EventType.OPERATION_CANCEL_DENIED,
-            EventType.OPERATION_STOP_REQUESTED: EventType.OPERATION_STOP_DENIED,
+            EventType.OPERATION_PAUSE_REQUESTED: EventType.OPERATION_PAUSE_DENIED,
             EventType.OPERATION_RESUME_REQUESTED: EventType.OPERATION_RESUME_DENIED,
         }
         return denied_event_type_by_requested_event_type.get(requested_event_type)
@@ -195,7 +197,7 @@ class RequestHandler:
             event_type=event_type,
             resource_id=operation.resource_id,
             operation_id=operation.operation.id,
-            data={},
+            data=EventData(),
         )
         self._append_event_history(event)
 
@@ -211,12 +213,12 @@ class RequestHandler:
                     metadata={"error": str(error)},
                 )
 
-        self._record_request_decision(
-            operation=operation,
-            event_type=event_type,
-            decision=decision,
-        )
         event.data = self._decision_event_data(decision)
+        self._record_request_event(
+            operation_id=operation.operation.id,
+            event=event,
+            append_operation_event=self._append_operation_event,
+        )
 
         self._log_event(event)
         self._notify_wakeup()
@@ -231,7 +233,7 @@ class RequestHandler:
             event_type=event_type,
             resource_id=operation.resource_id,
             operation_id=operation.operation.id,
-            data={},
+            data=EventData(),
         )
         self._append_event_history(event)
 
@@ -247,12 +249,12 @@ class RequestHandler:
                     metadata={"error": str(error)},
                 )
 
-        self._record_request_decision(
-            operation=operation,
-            event_type=event_type,
-            decision=decision,
-        )
         event.data = self._decision_event_data(decision)
+        self._record_request_event(
+            operation_id=operation.operation.id,
+            event=event,
+            append_operation_event=self._append_operation_event,
+        )
 
         self._log_event(event)
         self._notify_wakeup()
@@ -273,28 +275,16 @@ class RequestHandler:
         )
 
     @staticmethod
-    def _decision_event_data(decision: RequestDecision) -> dict[str, Any]:
-        data: dict[str, Any] = {"is_allowed": decision.is_allowed}
-        if decision.reason is not None:
-            data["reason"] = decision.reason
-        if decision.metadata:
-            data["metadata"] = decision.metadata
-        return data
+    def _decision_event_data(decision: RequestDecision) -> EventData:
+        return EventData(request_decision=decision)
 
     @staticmethod
-    def _record_request_decision(
-        operation: ScheduledOperation,
-        event_type: EventType,
-        decision: RequestDecision,
+    def _record_request_event(
+        operation_id: UUID,
+        event: DispatchEvent,
+        append_operation_event: Callable[[UUID, DispatchEvent], None],
     ) -> None:
-        operation.request_decision_history.append(
-            RequestDecisionRecord(
-                event_type=event_type,
-                is_allowed=decision.is_allowed,
-                reason=decision.reason,
-                metadata=decision.metadata,
-            )
-        )
+        append_operation_event(operation_id, event)
 
     async def _invoke_request_callback_async(self, event: DispatchEvent) -> object:
         if self._on_request_callback is None:

@@ -11,7 +11,13 @@ from flask import jsonify, request
 from flasgger import swag_from
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from .models import Operation, ScheduledOperation
+from .models import (
+    EventType,
+    ExecutionState,
+    Operation,
+    OperationHistoryEntry,
+    ScheduledOperation,
+)
 from .operation_dispatcher import OperationDispatcher
 
 
@@ -81,16 +87,13 @@ class OperationDispatcherOpenAPI:
                 status_code=400,
             )
 
-        history_operations = self._operation_dispatcher.dispatch_queue.history(
+        history_entries = self._operation_dispatcher.get_history_entries(
             limit=resolved_limit
         )
         payload = {
             "limit": resolved_limit,
-            "count": len(history_operations),
-            "operations": [
-                scheduled_operation.model_dump(mode="json")
-                for scheduled_operation in history_operations
-            ],
+            "count": len(history_entries),
+            "entries": [entry.model_dump(mode="json") for entry in history_entries],
         }
         return payload, 200
 
@@ -323,21 +326,6 @@ class OperationDispatcherOpenAPI:
             "state": state,
         }, 202
 
-    def pause_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        if self._operation_dispatcher.is_paused:
-            state, _ = self.get_operation_dispatcher_state_response()
-            return {
-                "message": "operation dispatcher is already paused",
-                "state": state,
-            }, 409
-
-        self._operation_dispatcher.pause()
-        state, _ = self.get_operation_dispatcher_state_response()
-        return {
-            "message": "operation dispatcher paused",
-            "state": state,
-        }, 200
-
     def resume_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
         if not self._operation_dispatcher.is_paused:
             state, _ = self.get_operation_dispatcher_state_response()
@@ -374,7 +362,7 @@ class OperationDispatcherOpenAPI:
 
         return cancelled_operation.model_dump(mode="json"), 200
 
-    def stop_current_operation_response(self) -> tuple[dict[str, Any], int]:
+    def pause_current_operation_response(self) -> tuple[dict[str, Any], int]:
         current_operation = self._operation_dispatcher.current_scheduled_operation
         if current_operation is None:
             return self._error_response(
@@ -383,23 +371,47 @@ class OperationDispatcherOpenAPI:
                 status_code=404,
             )
 
+        current_execution = self._operation_dispatcher.current_execution
+        if (
+            current_execution is None
+            or current_execution.state is not ExecutionState.RUNNING
+        ):
+            return self._error_response(
+                message="current operation is not running",
+                code="current_operation_not_running",
+                status_code=409,
+            )
+
         try:
-            stopped_operation = self._operation_dispatcher.stop_current()
-        except RuntimeError:
+            is_paused = self._operation_dispatcher.pause_current()
+        except RuntimeError as error:
+            if str(error) == "current operation is not running":
+                return self._error_response(
+                    message="current operation is not running",
+                    code="current_operation_not_running",
+                    status_code=409,
+                )
             return self._error_response(
                 message="no current operation",
                 code="no_current_operation",
                 status_code=404,
             )
 
-        if self._operation_dispatcher.current_scheduled_operation is not None:
+        if not is_paused:
             return self._error_response(
-                message="current operation stop denied",
-                code="current_operation_stop_denied",
+                message="current operation pause denied",
+                code="current_operation_pause_denied",
                 status_code=409,
             )
 
-        return stopped_operation.model_dump(mode="json"), 200
+        paused_operation = self._operation_dispatcher.current_scheduled_operation
+        if paused_operation is None:
+            return self._error_response(
+                message="no current operation",
+                code="no_current_operation",
+                status_code=404,
+            )
+        return paused_operation.model_dump(mode="json"), 200
 
     def resume_current_operation_response(self) -> tuple[dict[str, Any], int]:
         current_operation = self._operation_dispatcher.current_scheduled_operation
@@ -410,8 +422,19 @@ class OperationDispatcherOpenAPI:
                 status_code=404,
             )
 
-        is_allowed = self._operation_dispatcher.request_resume_current()
-        if not is_allowed:
+        current_execution = self._operation_dispatcher.current_execution
+        if (
+            current_execution is None
+            or current_execution.state is not ExecutionState.PAUSED
+        ):
+            return self._error_response(
+                message="current operation is not paused",
+                code="current_operation_not_paused",
+                status_code=409,
+            )
+
+        self._operation_dispatcher.resume()
+        if self._operation_dispatcher.is_paused:
             return self._error_response(
                 message="current operation resume denied",
                 code="current_operation_resume_denied",
@@ -438,10 +461,9 @@ class OperationDispatcherOpenAPI:
         self.register_get_operation_dispatcher_state_endpoint(app)
         self.register_start_operation_dispatcher_endpoint(app)
         self.register_stop_operation_dispatcher_endpoint(app)
-        self.register_pause_operation_dispatcher_endpoint(app)
         self.register_resume_operation_dispatcher_endpoint(app)
         self.register_cancel_current_operation_endpoint(app)
-        self.register_stop_current_operation_endpoint(app)
+        self.register_pause_current_operation_endpoint(app)
         self.register_resume_current_operation_endpoint(app)
 
     def _register_json_endpoint(
@@ -622,21 +644,6 @@ class OperationDispatcherOpenAPI:
             response_handler=self.stop_operation_dispatcher_response,
         )
 
-    def register_pause_operation_dispatcher_endpoint(
-        self,
-        app: Any,
-        route: str = "/operation_dispatcher/pause",
-        endpoint_name: str = "pause",
-    ) -> None:
-        self._register_json_endpoint(
-            app,
-            method="POST",
-            route=route,
-            endpoint_name=endpoint_name,
-            openapi_spec=self.pause_operation_dispatcher_openapi_spec(),
-            response_handler=self.pause_operation_dispatcher_response,
-        )
-
     def register_resume_operation_dispatcher_endpoint(
         self,
         app: Any,
@@ -667,19 +674,19 @@ class OperationDispatcherOpenAPI:
             response_handler=self.cancel_current_operation_response,
         )
 
-    def register_stop_current_operation_endpoint(
+    def register_pause_current_operation_endpoint(
         self,
         app: Any,
-        route: str = "/operation_dispatcher/current_operation/stop",
-        endpoint_name: str = "stop_current_operation",
+        route: str = "/operation_dispatcher/current_operation/pause",
+        endpoint_name: str = "pause_current_operation",
     ) -> None:
         self._register_json_endpoint(
             app,
             method="POST",
             route=route,
             endpoint_name=endpoint_name,
-            openapi_spec=self.stop_current_operation_openapi_spec(),
-            response_handler=self.stop_current_operation_response,
+            openapi_spec=self.pause_current_operation_openapi_spec(),
+            response_handler=self.pause_current_operation_response,
         )
 
     def register_resume_current_operation_endpoint(
@@ -845,7 +852,7 @@ class OperationDispatcherOpenAPI:
             "responses": {
                 200: {
                     "description": "Current dispatcher runtime state.",
-                    "schema": {"$ref": "#/definitions/OperationManagerState"},
+                    "schema": {"$ref": "#/definitions/OperationDispatcherState"},
                 }
             },
         }
@@ -885,27 +892,6 @@ class OperationDispatcherOpenAPI:
                 },
                 409: {
                     "description": "Operation dispatcher is not running.",
-                    "schema": {
-                        "$ref": "#/definitions/OperationDispatcherRuntimeActionResponse"
-                    },
-                },
-            },
-        }
-
-    @staticmethod
-    def pause_operation_dispatcher_openapi_spec() -> dict[str, Any]:
-        return {
-            "tags": ["Operation Dispatcher Runtime"],
-            "produces": ["application/json"],
-            "responses": {
-                200: {
-                    "description": "Operation dispatcher paused.",
-                    "schema": {
-                        "$ref": "#/definitions/OperationDispatcherRuntimeActionResponse"
-                    },
-                },
-                409: {
-                    "description": "Operation dispatcher is already paused.",
                     "schema": {
                         "$ref": "#/definitions/OperationDispatcherRuntimeActionResponse"
                     },
@@ -956,13 +942,13 @@ class OperationDispatcherOpenAPI:
         }
 
     @staticmethod
-    def stop_current_operation_openapi_spec() -> dict[str, Any]:
+    def pause_current_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operation Dispatcher"],
             "produces": ["application/json"],
             "responses": {
                 200: {
-                    "description": "Current operation stopped.",
+                    "description": "Current operation paused.",
                     "schema": {"$ref": "#/definitions/ScheduledOperation"},
                 },
                 404: {
@@ -970,7 +956,7 @@ class OperationDispatcherOpenAPI:
                     "schema": {"$ref": "#/definitions/ErrorResponse"},
                 },
                 409: {
-                    "description": "Current operation stop request denied.",
+                    "description": "Current operation is not running or pause request denied.",
                     "schema": {"$ref": "#/definitions/ErrorResponse"},
                 },
             },
@@ -1034,9 +1020,87 @@ class OperationDispatcherOpenAPI:
                         "format": "date-time",
                     },
                 },
-                "required": ["operation", "resource_id", "priority", "created_at"],
+                "required": [
+                    "operation",
+                    "resource_id",
+                    "priority",
+                    "created_at",
+                ],
             },
-            "OperationManagerState": {
+            "OperationExecution": {
+                "type": "object",
+                "properties": {
+                    "operation_id": {"type": "string", "format": "uuid"},
+                    "state": {"type": "string"},
+                    "outcome": {"type": "string"},
+                    "termination_reason": {"type": "string"},
+                    "retry_count": {"type": "integer"},
+                    "start_time": {"type": "string", "format": "date-time"},
+                    "finish_time": {"type": "string", "format": "date-time"},
+                },
+                "required": [
+                    "operation_id",
+                    "state",
+                    "outcome",
+                    "termination_reason",
+                    "retry_count",
+                ],
+            },
+            "DispatchEvent": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "event_type": {
+                        "type": "string",
+                        "enum": [event.value for event in EventType],
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time",
+                    },
+                    "resource_id": {
+                        "type": "string",
+                    },
+                    "operation_id": {
+                        "type": "string",
+                        "format": "uuid",
+                    },
+                    "data": {"$ref": "#/definitions/EventData"},
+                },
+                "required": ["id", "event_type", "created_at", "data"],
+            },
+            "OperationHistoryEntry": {
+                "type": "object",
+                "properties": {
+                    "scheduled_operation": {"$ref": "#/definitions/ScheduledOperation"},
+                    "execution": {"$ref": "#/definitions/OperationExecution"},
+                    "events": {
+                        "type": "array",
+                        "items": {"$ref": "#/definitions/DispatchEvent"},
+                    },
+                },
+                "required": ["scheduled_operation", "execution", "events"],
+            },
+            "EventData": {
+                "type": "object",
+                "properties": {
+                    "request_decision": {"$ref": "#/definitions/RequestDecision"},
+                },
+                "additionalProperties": True,
+            },
+            "RequestDecision": {
+                "type": "object",
+                "properties": {
+                    "is_allowed": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["is_allowed", "metadata"],
+            },
+            "OperationDispatcherState": {
                 "type": "object",
                 "properties": {
                     "is_running": {"type": "boolean"},
@@ -1071,7 +1135,7 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "message": {"type": "string"},
-                    "state": {"$ref": "#/definitions/OperationManagerState"},
+                    "state": {"$ref": "#/definitions/OperationDispatcherState"},
                 },
                 "required": ["message", "state"],
             },
@@ -1080,12 +1144,12 @@ class OperationDispatcherOpenAPI:
                 "properties": {
                     "limit": {"type": "integer"},
                     "count": {"type": "integer"},
-                    "operations": {
+                    "entries": {
                         "type": "array",
-                        "items": {"$ref": "#/definitions/ScheduledOperation"},
+                        "items": {"$ref": "#/definitions/OperationHistoryEntry"},
                     },
                 },
-                "required": ["limit", "count", "operations"],
+                "required": ["limit", "count", "entries"],
             },
             "AddOperationRequest": {
                 "type": "array",
