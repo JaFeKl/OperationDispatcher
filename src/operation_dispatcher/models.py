@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
-
+import abc
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -56,43 +56,34 @@ class EventType(str, Enum):
     OPERATION_CANCELLED = "operation_cancelled"
 
 
+class DependencyType(str, Enum):
+    FINISH_TO_START = "FINISH_TO_START"
+    START_TO_START = "START_TO_START"
+
+
 class DispatchEvent(BaseModel):
+    """
+    A record of an event that occurred during the lifecycle of an operation,
+    such as start, completion, failure, etc.
+    """
+
     id: UUID = Field(default_factory=uuid4)
+    execution_id: UUID
+    operation_id: UUID
     event_type: EventType
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    resource_id: str | None = None
-    operation_id: UUID | None = None
-    data: EventData = Field(default_factory=lambda: EventData())
-
-
-class RequestDecision(BaseModel):
-    is_allowed: bool
-    reason: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class EventData(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    request_decision: RequestDecision | None = None
-
-
-class Operation(BaseModel):
-    """
-    Domain-level unit of work.
-    Users are expected to subclass this model
-    with application-specific fields.
-    """
-
-    id: UUID = Field(default_factory=uuid4)
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScheduledOperation(BaseModel):
     """
     An operation scheduled for execution on an agent/resource.
+    The payload field is user-defined and can contain any information needed
+    to execute the operation, such as command, parameters, etc.
     """
 
-    operation: Operation
+    id: UUID = Field(default_factory=uuid4)
+    payload: dict[str, Any] = Field(default_factory=dict)
     resource_id: str
     priority: int = 0
     release_date: datetime | None = None
@@ -118,6 +109,7 @@ class OperationExecution(BaseModel):
     Runtime execution information.
     """
 
+    id: UUID = Field(default_factory=uuid4)
     operation_id: UUID
     state: ExecutionState = ExecutionState.QUEUED
     outcome: ExecutionOutcome = ExecutionOutcome.NONE
@@ -140,6 +132,20 @@ class OperationExecution(BaseModel):
         return self
 
 
+class OperationDependency(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    operation_id: UUID
+    depends_on_operation_id: UUID
+    dependency_type: DependencyType
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def validate_unique_dependency(self) -> OperationDependency:
+        if self.operation_id == self.depends_on_operation_id:
+            raise ValueError("operation cannot depend on itself")
+        return self
+
+
 class OperationHistoryEntry(BaseModel):
     scheduled_operation: ScheduledOperation
     execution: OperationExecution
@@ -150,6 +156,6 @@ class OperationDispatcherState(BaseModel):
     is_running: bool
     is_paused: bool
     queue_size: int
-    current_operation: Operation | None = None
+    current_operation: ScheduledOperation | None = None
     running_since: datetime | None = None
     uptime_seconds: float | None = None
