@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import inspect
 import queue
 import threading
@@ -11,12 +12,17 @@ from uuid import UUID
 
 from .models import (
     DispatchEvent,
-    EventData,
     EventType,
-    RequestDecision,
     ScheduledOperation,
 )
 from .retry_policy import RetryPolicy
+
+
+@dataclass(slots=True, frozen=True)
+class RequestDecision:
+    accepted: bool
+    reasoning: str | None = None
+    data: dict[str, Any] | None = None
 
 
 class RequestHandler:
@@ -27,6 +33,7 @@ class RequestHandler:
         request_event_timeout_seconds: float,
         append_event_history: Callable[[DispatchEvent], None],
         append_operation_event: Callable[[UUID, DispatchEvent], None],
+        get_execution_id: Callable[[UUID], UUID | None],
         emit_event: Callable[
             [
                 EventType,
@@ -44,6 +51,7 @@ class RequestHandler:
         self._request_event_timeout_seconds = request_event_timeout_seconds
         self._append_event_history = append_event_history
         self._append_operation_event = append_operation_event
+        self._get_execution_id = get_execution_id
         self._emit_event = emit_event
         self._log_event = log_event
         self._notify_wakeup = notify_wakeup
@@ -60,7 +68,7 @@ class RequestHandler:
         request_event_types = (EventType.OPERATION_START_REQUESTED,)
         for request_event_type in request_event_types:
             retry_key = self._request_retry_key(
-                operation.operation.id,
+                operation.id,
                 request_event_type,
             )
             if self._request_retry_policy.is_cooldown_active(retry_key, now):
@@ -85,7 +93,7 @@ class RequestHandler:
         request_event_types = (EventType.OPERATION_START_REQUESTED,)
         for request_event_type in request_event_types:
             retry_key = self._request_retry_key(
-                operation.operation.id,
+                operation.id,
                 request_event_type,
             )
             wait_seconds = self._request_retry_policy.cooldown_wait_seconds(
@@ -101,12 +109,12 @@ class RequestHandler:
         event_type: EventType,
     ) -> bool:
         now = datetime.now(timezone.utc)
-        retry_key = self._request_retry_key(operation.operation.id, event_type)
+        retry_key = self._request_retry_key(operation.id, event_type)
         if self._request_retry_policy.is_cooldown_active(retry_key, now):
             return False
 
         decision = self._request_operation_event_sync(operation, event_type)
-        if decision.is_allowed:
+        if decision.accepted:
             self._request_retry_policy.clear(retry_key)
             return True
 
@@ -118,10 +126,10 @@ class RequestHandler:
         denied_event_type = self._denied_event_type(event_type)
         if denied_event_type is not None:
             denied_metadata = dict(metadata)
-            if decision.reason is not None:
-                denied_metadata["reason"] = decision.reason
-            if decision.metadata:
-                denied_metadata["decision_metadata"] = decision.metadata
+            if decision.reasoning is not None:
+                denied_metadata["reasoning"] = decision.reasoning
+            if decision.data:
+                denied_metadata["decision_data"] = decision.data
             self._emit_event(
                 denied_event_type,
                 operation,
@@ -138,12 +146,12 @@ class RequestHandler:
         event_type: EventType,
     ) -> bool:
         now = datetime.now(timezone.utc)
-        retry_key = self._request_retry_key(operation.operation.id, event_type)
+        retry_key = self._request_retry_key(operation.id, event_type)
         if self._request_retry_policy.is_cooldown_active(retry_key, now):
             return False
 
         decision = await self._request_operation_event(operation, event_type)
-        if decision.is_allowed:
+        if decision.accepted:
             self._request_retry_policy.clear(retry_key)
             return True
 
@@ -155,10 +163,10 @@ class RequestHandler:
         denied_event_type = self._denied_event_type(event_type)
         if denied_event_type is not None:
             denied_metadata = dict(metadata)
-            if decision.reason is not None:
-                denied_metadata["reason"] = decision.reason
-            if decision.metadata:
-                denied_metadata["decision_metadata"] = decision.metadata
+            if decision.reasoning is not None:
+                denied_metadata["reasoning"] = decision.reasoning
+            if decision.data:
+                denied_metadata["decision_data"] = decision.data
             self._emit_event(
                 denied_event_type,
                 operation,
@@ -193,29 +201,33 @@ class RequestHandler:
         operation: ScheduledOperation,
         event_type: EventType,
     ) -> RequestDecision:
+        execution_id = self._get_execution_id(operation.id)
+        if execution_id is None:
+            raise RuntimeError(f"missing execution state for operation {operation.id}")
+
         event = DispatchEvent(
+            execution_id=execution_id,
+            operation_id=operation.id,
             event_type=event_type,
-            resource_id=operation.resource_id,
-            operation_id=operation.operation.id,
-            data=EventData(),
+            payload={},
         )
         self._append_event_history(event)
 
-        decision = RequestDecision(is_allowed=True)
+        decision = RequestDecision(accepted=True)
         if self._on_request_callback is not None:
             try:
                 callback_result = await self._invoke_request_callback_async(event)
                 decision = self._resolve_request_decision(callback_result)
             except Exception as error:
                 decision = RequestDecision(
-                    is_allowed=False,
-                    reason="request_callback_exception",
-                    metadata={"error": str(error)},
+                    accepted=False,
+                    reasoning="request_callback_exception",
+                    data={"error": str(error)},
                 )
 
-        event.data = self._decision_event_data(decision)
+        event.payload = self._decision_event_payload(decision)
         self._record_request_event(
-            operation_id=operation.operation.id,
+            operation_id=operation.id,
             event=event,
             append_operation_event=self._append_operation_event,
         )
@@ -229,29 +241,33 @@ class RequestHandler:
         operation: ScheduledOperation,
         event_type: EventType,
     ) -> RequestDecision:
+        execution_id = self._get_execution_id(operation.id)
+        if execution_id is None:
+            raise RuntimeError(f"missing execution state for operation {operation.id}")
+
         event = DispatchEvent(
+            execution_id=execution_id,
+            operation_id=operation.id,
             event_type=event_type,
-            resource_id=operation.resource_id,
-            operation_id=operation.operation.id,
-            data=EventData(),
+            payload={},
         )
         self._append_event_history(event)
 
-        decision = RequestDecision(is_allowed=True)
+        decision = RequestDecision(accepted=True)
         if self._on_request_callback is not None:
             try:
                 callback_result = self._invoke_request_callback_sync(event)
                 decision = self._resolve_request_decision(callback_result)
             except Exception as error:
                 decision = RequestDecision(
-                    is_allowed=False,
-                    reason="request_callback_exception",
-                    metadata={"error": str(error)},
+                    accepted=False,
+                    reasoning="request_callback_exception",
+                    data={"error": str(error)},
                 )
 
-        event.data = self._decision_event_data(decision)
+        event.payload = self._decision_event_payload(decision)
         self._record_request_event(
-            operation_id=operation.operation.id,
+            operation_id=operation.id,
             event=event,
             append_operation_event=self._append_operation_event,
         )
@@ -264,19 +280,60 @@ class RequestHandler:
     def _resolve_request_decision(callback_result: object) -> RequestDecision:
         if isinstance(callback_result, RequestDecision):
             return callback_result
+        if isinstance(callback_result, dict):
+            accepted = bool(callback_result.get("accepted", False))
+            reasoning = callback_result.get("reasoning")
+            if reasoning is not None and not isinstance(reasoning, str):
+                reasoning = str(reasoning)
+            data = callback_result.get("data")
+            if data is None:
+                data_dict: dict[str, Any] = {}
+            elif isinstance(data, dict):
+                data_dict = data
+            else:
+                data_dict = {"value": data}
+            return RequestDecision(
+                accepted=accepted,
+                reasoning=reasoning,
+                data=data_dict,
+            )
+        if hasattr(callback_result, "accepted"):
+            accepted = bool(getattr(callback_result, "accepted"))
+            reasoning_raw = getattr(callback_result, "reasoning", None)
+            data_raw = getattr(callback_result, "data", {})
+            return RequestDecision(
+                accepted=accepted,
+                reasoning=(str(reasoning_raw) if reasoning_raw is not None else None),
+                data=data_raw if isinstance(data_raw, dict) else {"value": data_raw},
+            )
+        if hasattr(callback_result, "is_allowed"):
+            accepted = bool(getattr(callback_result, "is_allowed"))
+            reasoning_raw = getattr(callback_result, "reason", None)
+            data_raw = getattr(callback_result, "metadata", {})
+            return RequestDecision(
+                accepted=accepted,
+                reasoning=(str(reasoning_raw) if reasoning_raw is not None else None),
+                data=data_raw if isinstance(data_raw, dict) else {"value": data_raw},
+            )
         if callback_result is True:
-            return RequestDecision(is_allowed=True)
+            return RequestDecision(accepted=True)
         if callback_result is False:
-            return RequestDecision(is_allowed=False)
+            return RequestDecision(accepted=False)
         return RequestDecision(
-            is_allowed=False,
-            reason="invalid_callback_result",
-            metadata={"result_type": type(callback_result).__name__},
+            accepted=False,
+            reasoning="invalid_callback_result",
+            data={"result_type": type(callback_result).__name__},
         )
 
     @staticmethod
-    def _decision_event_data(decision: RequestDecision) -> EventData:
-        return EventData(request_decision=decision)
+    def _decision_event_payload(decision: RequestDecision) -> dict[str, Any]:
+        return {
+            "request_decision": {
+                "accepted": decision.accepted,
+                "reasoning": decision.reasoning,
+                "data": decision.data or {},
+            }
+        }
 
     @staticmethod
     def _record_request_event(

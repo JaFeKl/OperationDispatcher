@@ -8,28 +8,15 @@ from uuid import UUID
 
 from flask import Flask, jsonify
 from flasgger import Swagger
-from pydantic import Field
 
 from operation_dispatcher import (
     DispatchEvent,
     EventType,
-    Operation,
     OperationDispatcher,
     OperationDispatcherOpenAPI,
     ScheduledOperation,
 )
 from operation_dispatcher import SimulatedOperationRunner
-
-
-class DemoOperation(Operation):
-    """User defined operation type for demonstration purposes."""
-
-    name: str
-    source_station: str
-    target_station: str
-    pallet_id: str
-    retries: int = 0
-    run_seconds: float = Field(default=10.0, gt=0)
 
 
 class DemoDispatcherService:
@@ -42,7 +29,6 @@ class DemoDispatcherService:
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
-            operation_model=DemoOperation,
             on_request_callback=self._on_request_handler,
             on_notification_callback=self._on_notification_handler,
             start_request_max_retries=3,
@@ -53,26 +39,26 @@ class DemoDispatcherService:
 
         self.operation_dispatcher.add(
             ScheduledOperation(
-                operation=DemoOperation(
-                    name="pickup_pallet",
-                    source_station="INBOUND_A",
-                    target_station="BUFFER_01",
-                    pallet_id="PALLET-1001",
-                    run_seconds=10.0,
-                ),
+                payload={
+                    "name": "pickup_pallet",
+                    "source_station": "INBOUND_A",
+                    "target_station": "BUFFER_01",
+                    "pallet_id": "PALLET-1001",
+                    "run_seconds": 10.0,
+                },
                 resource_id="robot-1",
                 priority=0,
             )
         )
         self.operation_dispatcher.add(
             ScheduledOperation(
-                operation=DemoOperation(
-                    name="dropoff_pallet",
-                    source_station="BUFFER_01",
-                    target_station="OUTBOUND_B",
-                    pallet_id="PALLET-1001",
-                    run_seconds=10.0,
-                ),
+                payload={
+                    "name": "dropoff_pallet",
+                    "source_station": "BUFFER_01",
+                    "target_station": "OUTBOUND_B",
+                    "pallet_id": "PALLET-1001",
+                    "run_seconds": 10.0,
+                },
                 resource_id="robot-1",
                 priority=0,
             )
@@ -93,8 +79,10 @@ class DemoDispatcherService:
         if event.event_type is EventType.OPERATION_START_REQUESTED:
             try:
                 self._simulated_runner.start(
-                    operation_id=scheduled_operation.operation.id,
-                    run_seconds=scheduled_operation.operation.run_seconds,
+                    operation_id=scheduled_operation.id,
+                    run_seconds=float(
+                        scheduled_operation.payload.get("run_seconds", 5.0)
+                    ),
                 )
                 return True
             except RuntimeError as e:
@@ -105,9 +93,7 @@ class DemoDispatcherService:
 
         if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
             try:
-                self._simulated_runner.cancel(
-                    operation_id=scheduled_operation.operation.id
-                )
+                self._simulated_runner.cancel(operation_id=scheduled_operation.id)
                 return True
             except RuntimeError as e:
                 self._logger.warning(
@@ -117,9 +103,7 @@ class DemoDispatcherService:
 
         if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
             try:
-                self._simulated_runner.pause(
-                    operation_id=scheduled_operation.operation.id
-                )
+                self._simulated_runner.pause(operation_id=scheduled_operation.id)
                 return True
             except RuntimeError as e:
                 self._logger.warning(
@@ -129,9 +113,7 @@ class DemoDispatcherService:
 
         if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
             try:
-                self._simulated_runner.resume(
-                    operation_id=scheduled_operation.operation.id
-                )
+                self._simulated_runner.resume(operation_id=scheduled_operation.id)
             except RuntimeError as e:
                 self._logger.warning(
                     f"resume request failed for operation {event.operation_id} with error: {e}"
@@ -154,7 +136,7 @@ class DemoDispatcherService:
     def _on_completed(self, operation_id: UUID) -> None:
         """Callback for simulated operation completion. This should be called when an operation is completed by the simulated runner."""
         current_operation = self.operation_dispatcher.current_scheduled_operation
-        if current_operation is None or current_operation.operation.id != operation_id:
+        if current_operation is None or current_operation.id != operation_id:
             self._logger.warning(
                 f"simulated completion callback received for non-current operation_id {operation_id}"
             )
@@ -198,27 +180,7 @@ class DemoDispatcherService:
             return (
                 jsonify(
                     {
-                        "message": "Operation Dispatcher Flask + OpenAPI demo",
-                        "notes": {
-                            "start_handshake": "first start request for each operation is denied once to demonstrate retry/cooldown",
-                            "completion": "operations are auto-completed after operation.payload.run_seconds (default 5.0s)",
-                            "simulation": "a dedicated simulated worker thread supports true pause/resume for /operation_dispatcher/current_operation/pause and /operation_dispatcher/current_operation/resume",
-                        },
-                        "docs": "/docs/",
-                        "openapi": "/openapi.json",
-                        "queue": "/operation_dispatcher/queue",
-                        "history": "/operation_dispatcher/history",
-                        "get_current_operation": "/operation_dispatcher/current_operation",
-                        "get_next_operation": "/operation_dispatcher/next_operation",
-                        "add_operation": "/operation_dispatcher/add",
-                        "cancel_operation": "/operation_dispatcher/cancel_operation",
-                        "cancel_current_operation": "/operation_dispatcher/current_operation/cancel",
-                        "pause_current_operation": "/operation_dispatcher/current_operation/pause",
-                        "resume_current_operation": "/operation_dispatcher/current_operation/resume",
-                        "get_dispatcher_state": "/operation_dispatcher/state",
-                        "start": "/operation_dispatcher/start",
-                        "stop": "/operation_dispatcher/stop",
-                        "resume": "/operation_dispatcher/resume",
+                        "message": "Welcome to the Operation Dispatcher Demo API! Visit /docs/ for API documentation."
                     }
                 ),
                 200,

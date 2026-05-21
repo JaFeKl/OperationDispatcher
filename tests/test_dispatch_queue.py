@@ -8,7 +8,7 @@ from operation_dispatcher.dispatch_queue import (
     SortField,
     SortRule,
 )
-from operation_dispatcher.models import Operation, ScheduledOperation
+from operation_dispatcher.models import ScheduledOperation
 
 
 def _scheduled_operation(
@@ -20,7 +20,7 @@ def _scheduled_operation(
     planned_duration: timedelta | None = None,
 ) -> ScheduledOperation:
     return ScheduledOperation(
-        operation=Operation(),
+        payload={},
         resource_id=resource_id,
         priority=priority,
         release_date=release_date,
@@ -192,10 +192,10 @@ def test_cancel_queued_operation_moves_to_completed_history() -> None:
     operation = _scheduled_operation()
     queue.add(operation)
 
-    cancelled = queue.cancel(operation.operation.id)
+    cancelled = queue.cancel(operation.id)
 
     assert cancelled is operation
-    assert queue.get(operation.operation.id) is operation
+    assert queue.get(operation.id) is operation
     assert queue.completed_operations == [operation]
     assert len(queue) == 0
 
@@ -206,7 +206,7 @@ def test_cancel_pulled_operation_clears_active_and_archives() -> None:
     queue.add(operation)
     queue.next()
 
-    cancelled = queue.cancel(operation.operation.id)
+    cancelled = queue.cancel(operation.id)
 
     assert cancelled is operation
     assert queue.pulled_operation is None
@@ -250,12 +250,12 @@ def test_get_finds_queued_pulled_and_completed() -> None:
     active = queue.next()
     assert active is pulled
 
-    completed_cancelled = queue.cancel(completed.operation.id)
+    completed_cancelled = queue.cancel(completed.id)
     assert completed_cancelled is completed
 
-    assert queue.get(pulled.operation.id) is pulled
-    assert queue.get(queued.operation.id) is queued
-    assert queue.get(completed.operation.id) is completed
+    assert queue.get(pulled.id) is pulled
+    assert queue.get(queued.id) is queued
+    assert queue.get(completed.id) is completed
 
 
 def test_peek_and_list_and_remove_behaviour() -> None:
@@ -270,9 +270,9 @@ def test_peek_and_list_and_remove_behaviour() -> None:
     assert listed[0] is second
     assert queue.peek() is second
 
-    removed = queue.remove(first.operation.id)
+    removed = queue.remove(first.id)
     assert removed is first
-    assert queue.remove(first.operation.id) is None
+    assert queue.remove(first.id) is None
 
 
 def test_clear_and_clear_history_only_affect_respective_buckets() -> None:
@@ -282,7 +282,7 @@ def test_clear_and_clear_history_only_affect_respective_buckets() -> None:
 
     queue.add(queued)
     queue.add(completed)
-    queue.cancel(completed.operation.id)
+    queue.cancel(completed.id)
 
     queue.clear()
     assert len(queue) == 0

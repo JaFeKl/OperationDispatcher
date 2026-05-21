@@ -14,17 +14,11 @@ from flasgger import Swagger
 from operation_dispatcher import (
     DispatchEvent,
     EventType,
-    Operation,
     OperationDispatcher,
     OperationDispatcherMCPServer,
     OperationDispatcherOpenAPI,
     ScheduledOperation,
 )
-
-
-class DemoOperation(Operation):
-    name: str
-    run_seconds: float = 4.0
 
 
 class MyDispatcherService:
@@ -39,7 +33,6 @@ class MyDispatcherService:
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="demo_resource_1",
-            operation_model=DemoOperation,
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
             logger=self._logger,
@@ -48,14 +41,14 @@ class MyDispatcherService:
     def seed_operations(self) -> None:
         self.operation_dispatcher.add(
             ScheduledOperation(
-                operation=DemoOperation(name="pickup", run_seconds=3.0),
+                payload={"name": "pickup", "run_seconds": 3.0},
                 resource_id="robot-1",
                 priority=10,
             )
         )
         self.operation_dispatcher.add(
             ScheduledOperation(
-                operation=DemoOperation(name="dropoff", run_seconds=5.0),
+                payload={"name": "dropoff", "run_seconds": 5.0},
                 resource_id="robot-1",
                 priority=5,
             )
@@ -114,7 +107,9 @@ class MyDispatcherService:
         if current_operation is None or current_operation.id != operation_id:
             return
 
-        delay_seconds = max(0.1, float(current_operation.run_seconds))
+        delay_seconds = max(
+            0.1, float(current_operation.payload.get("run_seconds", 1.0))
+        )
         timer = threading.Timer(
             delay_seconds,
             self._complete_if_current,
@@ -131,7 +126,7 @@ class MyDispatcherService:
 
     def _complete_if_current(self, operation_id: UUID) -> None:
         current = self.operation_dispatcher.current_scheduled_operation
-        if current is None or current.operation.id != operation_id:
+        if current is None or current.id != operation_id:
             return
 
         self.operation_dispatcher.complete_current()

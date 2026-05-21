@@ -92,13 +92,13 @@ class DispatchQueue:
         Get an operation by ID from the schedule, including pending, pulled and completed operations.
         """
         if self._pulled is not None:
-            if self._pulled.operation.id == operation_id:
+            if self._pulled.id == operation_id:
                 return self._pulled
         for scheduled_operation in self._queue:
-            if scheduled_operation.operation.id == operation_id:
+            if scheduled_operation.id == operation_id:
                 return scheduled_operation
         for scheduled_operation in self._completed:
-            if scheduled_operation.operation.id == operation_id:
+            if scheduled_operation.id == operation_id:
                 return scheduled_operation
         return None
 
@@ -140,12 +140,12 @@ class DispatchQueue:
 
     def remove(self, operation_id: UUID) -> ScheduledOperation | None:
         for index, operation in enumerate(self._queue):
-            if operation.operation.id == operation_id:
+            if operation.id == operation_id:
                 return self._queue.pop(index)
         return None
 
     def cancel(self, operation_id: UUID) -> ScheduledOperation | None:
-        if self._pulled is not None and self._pulled.operation.id == operation_id:
+        if self._pulled is not None and self._pulled.id == operation_id:
             operation = self._pulled
             self._archive_completed_operation(operation)
             self._pulled = None

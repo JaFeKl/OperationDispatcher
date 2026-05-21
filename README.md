@@ -11,7 +11,7 @@ It is organized in three layers:
 ## Highlights
 
 - Typed models with Pydantic v2.
-- Custom operation schema via `operation_model`.
+- Flexible per-operation payload via `ScheduledOperation.payload`.
 - Request/notification callback split.
 - Retry/cooldown policy for denied start requests.
 - Runtime controls: start, stop, pause, resume.
@@ -39,8 +39,7 @@ pip install -e .[api]
 
 ## Core Data Models
 
-- `Operation`: base operation model (subclass this for app-specific fields).
-- `ScheduledOperation`: operation + dispatch metadata.
+- `ScheduledOperation`: payload + dispatch metadata.
 - `OperationExecution`: runtime execution state and outcome metadata, references a ScheduledOperation.
 - `DispatchEvent` with `EventType`: emitted for lifecycle/runtime/request flow.
 
@@ -104,8 +103,8 @@ Callbacks:
 - `OPERATION_START_DENIED`: indicates that a start request was denied; event metadata includes retry information and optionally the denial reason.
 - `OPERATION_CANCEL_REQUESTED`: asks whether a queued or active operation may be cancelled.
 - `OPERATION_CANCEL_DENIED`: indicates that a cancel request was denied.
-- `OPERATION_STOP_REQUESTED`: asks whether the current active operation may be stopped.
-- `OPERATION_STOP_DENIED`: indicates that a stop request was denied.
+- `OPERATION_PAUSE_REQUESTED`: asks whether the current active operation may be paused.
+- `OPERATION_PAUSE_DENIED`: indicates that a pause request was denied.
 - `OPERATION_RESUME_REQUESTED`: asks whether a paused current operation, or the paused dispatcher, may resume.
 - `OPERATION_RESUME_DENIED`: indicates that a resume request was denied.
 
@@ -115,7 +114,7 @@ Callbacks:
 - `OPERATION_STARTED`: emitted after the operation is pulled from the queue and marked running.
 - `OPERATION_COMPLETED`: emitted when the current operation finishes successfully.
 - `OPERATION_FAILED`: emitted when the current operation is marked failed because of an internal failure path.
-- `OPERATION_STOPPED`: emitted when the current operation is stopped after a successful stop request.
+- `OPERATION_PAUSED`: emitted when the current operation is paused after a successful pause request.
 - `OPERATION_CANCELLED`: emitted when an operation is cancelled, whether it was still queued or already active.
 
 ### How to interpret them
@@ -130,23 +129,17 @@ Callbacks:
 ### 1) Queue only
 
 ```python
-from operation_dispatcher import DispatchQueue, Operation, ScheduledOperation
-
-
-class WarehouseOperation(Operation):
-	name: str
-	source_station: str
-	target_station: str
+from operation_dispatcher import DispatchQueue, ScheduledOperation
 
 
 dispatch_queue = DispatchQueue(resource_id="robot-1")
 dispatch_queue.add(
 	ScheduledOperation(
-		operation=WarehouseOperation(
-			name="move_to_station_1",
-			source_station="INBOUND_A",
-			target_station="BUFFER_01",
-		),
+		payload={
+			"name": "move_to_station_1",
+			"source_station": "INBOUND_A",
+			"target_station": "BUFFER_01",
+		},
 		resource_id="robot-1",
 		priority=10,
 	)
@@ -160,12 +153,7 @@ print(next_op)
 
 ```python
 import asyncio
-from operation_dispatcher import DispatchEvent, EventType, Operation, OperationDispatcher, ScheduledOperation
-
-
-class WarehouseOperation(Operation):
-	name: str
-	task: str
+from operation_dispatcher import DispatchEvent, EventType, OperationDispatcher, ScheduledOperation
 
 
 def on_request(event: DispatchEvent) -> bool | None:
@@ -177,13 +165,12 @@ def on_request(event: DispatchEvent) -> bool | None:
 async def main() -> None:
 	dispatcher = OperationDispatcher(
 		resource_id="robot-1",
-		operation_model=WarehouseOperation,
 		on_request_callback=on_request,
 	)
 
 	dispatcher.add(
 		ScheduledOperation(
-			operation=WarehouseOperation(name="move", task="pickup"),
+			payload={"name": "move", "task": "pickup"},
 			resource_id="robot-1",
 			priority=10,
 		)
@@ -232,7 +219,7 @@ dispatcher_api.register_default_endpoints(app)
 - `POST /operation_dispatcher/cancel`
 - `GET /operation_dispatcher/current_operation`
 - `POST /operation_dispatcher/current_operation/cancel`
-- `POST /operation_dispatcher/current_operation/stop`
+- `POST /operation_dispatcher/current_operation/pause`
 - `POST /operation_dispatcher/current_operation/resume`
 
 #### Operation Dispatcher Runtime
@@ -240,7 +227,6 @@ dispatcher_api.register_default_endpoints(app)
 - `GET /operation_dispatcher/state`
 - `POST /operation_dispatcher/start`
 - `POST /operation_dispatcher/stop`
-- `POST /operation_dispatcher/pause`
 - `POST /operation_dispatcher/resume`
 
 ## Included Examples

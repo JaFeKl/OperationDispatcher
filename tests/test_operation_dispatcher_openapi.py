@@ -1,19 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from pydantic import BaseModel
 
 from operation_dispatcher import (
-    Operation,
     OperationDispatcher,
     OperationDispatcherOpenAPI,
     ScheduledOperation,
 )
-
-
-class ExampleOperationModel(Operation):
-    task: str
-    retries: int = 0
 
 
 def _scheduled_operation(
@@ -23,7 +16,7 @@ def _scheduled_operation(
     release_date: datetime | None = None,
 ) -> ScheduledOperation:
     return ScheduledOperation(
-        operation=ExampleOperationModel(task="sync"),
+        payload={"task": "sync", "retries": 0},
         resource_id=resource_id,
         priority=priority,
         release_date=release_date,
@@ -31,10 +24,7 @@ def _scheduled_operation(
 
 
 def test_dispatcher_openapi_get_dispatch_queue_response_returns_json_payload() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
     scheduled_operation = _scheduled_operation(resource_id="resource-a")
     dispatcher.add(scheduled_operation)
@@ -43,14 +33,11 @@ def test_dispatcher_openapi_get_dispatch_queue_response_returns_json_payload() -
 
     assert status_code == 200
     assert len(payload) == 1
-    assert payload[0]["operation"]["id"] == str(scheduled_operation.operation.id)
+    assert payload[0]["id"] == str(scheduled_operation.id)
 
 
 def test_dispatcher_openapi_get_current_and_next_operation_responses() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
     scheduled_operation = _scheduled_operation(resource_id="resource-a")
 
@@ -61,52 +48,46 @@ def test_dispatcher_openapi_get_current_and_next_operation_responses() -> None:
     dispatcher.add(scheduled_operation)
     next_payload, next_status = dispatcher_api.get_next_operation_response()
     assert next_status == 200
-    assert next_payload["operation"]["id"] == str(scheduled_operation.operation.id)
+    assert next_payload["id"] == str(scheduled_operation.id)
 
     dispatcher._start_next()
     current_payload, current_status = dispatcher_api.get_current_operation_response()
     assert current_status == 200
-    assert current_payload["operation"]["id"] == str(scheduled_operation.operation.id)
+    assert current_payload["id"] == str(scheduled_operation.id)
 
 
 def test_dispatcher_openapi_add_and_cancel_operation_responses() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
     added_payload, add_status = dispatcher_api.add_operation_response(
         [
             {
                 "priority": 3,
-                "operation": {"task": "collect", "retries": 1},
+                "payload": {"task": "collect", "retries": 1},
             }
         ]
     )
     assert add_status == 201
     assert len(added_payload) == 1
     assert added_payload[0]["resource_id"] == "resource-a"
-    assert "id" in added_payload[0]["operation"]
+    assert "id" in added_payload[0]
 
     cancelled_payload, cancel_status = dispatcher_api.cancel_operation_response(
-        added_payload[0]["operation"]["id"]
+        added_payload[0]["id"]
     )
     assert cancel_status == 200
-    assert cancelled_payload["operation"]["id"] == added_payload[0]["operation"]["id"]
+    assert cancelled_payload["id"] == added_payload[0]["id"]
 
 
 def test_dispatcher_openapi_add_operation_response_supports_batch_payload() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
     added_payload, add_status = dispatcher_api.add_operation_response(
         [
-            {"operation": {"task": "collect", "retries": 1}, "priority": 3},
-            {"operation": {"task": "inspect", "retries": 0}, "priority": 2},
+            {"payload": {"task": "collect", "retries": 1}, "priority": 3},
+            {"payload": {"task": "inspect", "retries": 0}, "priority": 2},
         ]
     )
 
@@ -115,11 +96,8 @@ def test_dispatcher_openapi_add_operation_response_supports_batch_payload() -> N
     assert len(dispatcher.dispatch_queue) == 2
 
 
-def test_dispatcher_openapi_add_operation_requires_operation_field() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+def test_dispatcher_openapi_add_operation_requires_payload_field() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
     response, status_code = dispatcher_api.add_operation_response({"priority": 1})
@@ -128,31 +106,26 @@ def test_dispatcher_openapi_add_operation_requires_operation_field() -> None:
     assert response["code"] == "invalid_operations"
 
 
-def test_dispatcher_openapi_validates_operation_model_payload() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+def test_dispatcher_openapi_validates_scheduled_operation_payload() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
     valid_payload, valid_status = dispatcher_api.add_operation_response(
-        [{"operation": {"task": "inspect", "retries": 2}}]
+        [{"payload": {"task": "inspect", "retries": 2}}]
     )
     assert valid_status == 201
-    assert "id" in valid_payload[0]["operation"]
+    assert "id" in valid_payload[0]
 
     invalid_payload, invalid_status = dispatcher_api.add_operation_response(
-        [{"operation": {"retries": 2}}]
+        [{"payload": "invalid"}]
     )
     assert invalid_status == 400
-    assert invalid_payload["code"] == "invalid_operation"
+    assert invalid_payload["code"] == "invalid_payload"
 
 
 def test_dispatcher_openapi_runtime_start_stop_and_state() -> None:
     dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-        poll_interval_seconds=0.01,
+        resource_id="resource-a", poll_interval_seconds=0.01
     )
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
@@ -175,9 +148,7 @@ def test_dispatcher_openapi_runtime_start_stop_and_state() -> None:
 
 def test_dispatcher_openapi_runtime_stop_returns_409_for_invalid_state() -> None:
     dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-        poll_interval_seconds=0.01,
+        resource_id="resource-a", poll_interval_seconds=0.01
     )
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
@@ -196,9 +167,7 @@ def test_dispatcher_openapi_current_operation_actions() -> None:
         return None
 
     dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-        on_request_callback=deny_pause_and_resume,
+        resource_id="resource-a", on_request_callback=deny_pause_and_resume
     )
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
@@ -232,10 +201,7 @@ def test_dispatcher_openapi_register_default_endpoints_exposes_required_routes()
     pytest.importorskip("flasgger")
     from flask import Flask
 
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
     app = Flask(__name__)
@@ -245,7 +211,7 @@ def test_dispatcher_openapi_register_default_endpoints_exposes_required_routes()
     assert client.get("/operation_dispatcher/queue").status_code == 200
     assert client.get("/operation_dispatcher/history").status_code == 200
     assert client.get("/operation_dispatcher/current_operation").status_code == 404
-    assert client.get("/operation_dispatcher/next_operation").status_code == 404
+    assert client.get("/operation_dispatcher/next").status_code == 404
     assert client.get("/operation_dispatcher/state").status_code == 200
     assert client.post("/operation_dispatcher/add", json={}).status_code == 400
     assert (
@@ -260,42 +226,32 @@ def test_dispatcher_openapi_register_default_endpoints_exposes_required_routes()
 
 
 def test_dispatcher_openapi_definitions_include_operation_model() -> None:
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
     definitions = dispatcher_api.get_openapi_definitions()
 
     assert "ScheduledOperation" in definitions
     assert "AddOperationRequest" in definitions
     assert "AddOperationItem" in definitions
-    assert "ExampleOperationModel" in definitions
     assert definitions["AddOperationRequest"]["type"] == "array"
-    assert (
-        definitions["AddOperationItem"]["properties"]["operation"]["$ref"]
-        == "#/definitions/ExampleOperationModel"
-    )
+    assert definitions["AddOperationItem"]["properties"]["payload"]["type"] == "object"
 
 
 def test_dispatcher_openapi_history_response_uses_limit_and_returns_newest_first() -> (
     None
 ):
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        operation_model=ExampleOperationModel,
-    )
+    dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
     first_payload, _ = dispatcher_api.add_operation_response(
-        [{"operation": {"task": "first"}}]
+        [{"payload": {"task": "first"}}]
     )
     second_payload, _ = dispatcher_api.add_operation_response(
-        [{"operation": {"task": "second"}}]
+        [{"payload": {"task": "second"}}]
     )
 
-    first_id = first_payload[0]["operation"]["id"]
-    second_id = second_payload[0]["operation"]["id"]
+    first_id = first_payload[0]["id"]
+    second_id = second_payload[0]["id"]
 
     pulled_first = dispatcher._start_next()
     assert pulled_first is not None
@@ -311,7 +267,7 @@ def test_dispatcher_openapi_history_response_uses_limit_and_returns_newest_first
     assert history_payload["limit"] == 1
     assert history_payload["count"] == 1
     history_entry = history_payload["entries"][0]
-    assert history_entry["scheduled_operation"]["operation"]["id"] in {
+    assert history_entry["scheduled_operation"]["id"] in {
         first_id,
         second_id,
     }

@@ -12,15 +12,12 @@ from uuid import UUID
 from .dispatch_queue import DispatchQueue, SortRule
 from .models import (
     DispatchEvent,
-    EventData,
     EventType,
     ExecutionOutcome,
     ExecutionState,
     OperationHistoryEntry,
-    Operation,
     OperationExecution,
     OperationDispatcherState,
-    RequestDecision,
     ScheduledOperation,
     TerminationReason,
 )
@@ -34,21 +31,20 @@ class OperationDispatcher:
     Runtime coordinator for one resource dispatch queue.
 
     Scheduling (`DispatchQueue`) and runtime execution (`OperationExecution`) are
-    intentionally separated and synchronized by operation id.
+    intentionally separated and synchronized by scheduled operation id.
     """
 
     def __init__(
         self,
         resource_id: str,
         on_request_callback: (
-            Callable[[DispatchEvent], bool | RequestDecision | None] | None
+            Callable[[DispatchEvent], bool | dict[str, Any] | None] | None
         ) = None,
         on_notification_callback: Callable[[DispatchEvent], object] | None = None,
         poll_interval_seconds: float = 0.1,
         start_request_max_retries: int = 5,
         start_request_retry_cooldown_seconds: float = 1.0,
         request_event_timeout_seconds: float = 5.0,
-        operation_model: type[Operation] | None = None,
         dispatch_queue_sort_rules: list[SortRule] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -63,12 +59,7 @@ class OperationDispatcher:
         if request_event_timeout_seconds <= 0:
             raise ValueError("request_event_timeout_seconds must be greater than 0")
 
-        resolved_operation_model = operation_model or Operation
-        if not issubclass(resolved_operation_model, Operation):
-            raise TypeError("operation_model must inherit from Operation")
-
         self._logger = logger
-        self._operation_model = resolved_operation_model
         self._dispatch_queue = DispatchQueue(
             resource_id=resource_id,
             sort_rules=dispatch_queue_sort_rules,
@@ -101,6 +92,7 @@ class OperationDispatcher:
             request_event_timeout_seconds=request_event_timeout_seconds,
             append_event_history=self._append_event_history,
             append_operation_event=self._append_operation_event,
+            get_execution_id=self._get_execution_id,
             emit_event=self._emit_event,
             log_event=self._log_event,
             notify_wakeup=self._notify_wakeup,
@@ -116,18 +108,15 @@ class OperationDispatcher:
         return self._dispatch_queue.pulled_operation
 
     @property
-    def current_operation(self) -> Operation | None:
-        current = self.current_scheduled_operation
-        if current is None:
-            return None
-        return current.operation
+    def current_operation(self) -> ScheduledOperation | None:
+        return self.current_scheduled_operation
 
     @property
     def current_execution(self) -> OperationExecution | None:
         current = self.current_scheduled_operation
         if current is None:
             return None
-        return self._executions_by_operation_id.get(current.operation.id)
+        return self._executions_by_operation_id.get(current.id)
 
     @property
     def is_paused(self) -> bool:
@@ -142,20 +131,15 @@ class OperationDispatcher:
     def is_stopping(self) -> bool:
         return self._stop_requested and self.is_running
 
-    @property
-    def operation_model(self) -> type[Operation]:
-        return self._operation_model
-
     def add(self, scheduled_operation: ScheduledOperation) -> None:
         self._execute_state_mutation(lambda: self._add_internal(scheduled_operation))
 
     def _add_internal(self, scheduled_operation: ScheduledOperation) -> None:
-        self._validate_operation_model(scheduled_operation.operation)
         self._dispatch_queue.add(scheduled_operation)
-        self._executions_by_operation_id[scheduled_operation.operation.id] = (
-            OperationExecution(operation_id=scheduled_operation.operation.id)
+        self._executions_by_operation_id[scheduled_operation.id] = OperationExecution(
+            operation_id=scheduled_operation.id
         )
-        self._events_by_operation_id.setdefault(scheduled_operation.operation.id, [])
+        self._events_by_operation_id.setdefault(scheduled_operation.id, [])
         self._emit_event(
             EventType.OPERATION_ADDED,
             scheduled_operation=scheduled_operation,
@@ -219,7 +203,7 @@ class OperationDispatcher:
         if scheduled_operation is None:
             return None
 
-        execution = self._require_execution(scheduled_operation.operation.id)
+        execution = self._require_execution(scheduled_operation.id)
         execution.state = ExecutionState.RUNNING
         if execution.start_time is None:
             execution.start_time = datetime.now(timezone.utc)
@@ -293,7 +277,7 @@ class OperationDispatcher:
 
     def _complete_current_internal(self) -> ScheduledOperation:
         scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.operation.id)
+        execution = self._require_execution(scheduled_operation.id)
         execution.state = ExecutionState.COMPLETED
         execution.outcome = ExecutionOutcome.SUCCESS
         execution.termination_reason = TerminationReason.NONE
@@ -311,7 +295,7 @@ class OperationDispatcher:
 
     def _fail_current_internal(self) -> ScheduledOperation:
         scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.operation.id)
+        execution = self._require_execution(scheduled_operation.id)
         execution.state = ExecutionState.FAILED
         execution.outcome = ExecutionOutcome.FAILURE
         execution.termination_reason = TerminationReason.INTERNAL_ERROR
@@ -329,7 +313,7 @@ class OperationDispatcher:
 
     def _pause_current_internal(self) -> bool:
         scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.operation.id)
+        execution = self._require_execution(scheduled_operation.id)
         if execution.state is not ExecutionState.RUNNING:
             raise RuntimeError("current operation is not running")
 
@@ -380,15 +364,13 @@ class OperationDispatcher:
         if cancelled_operation is None:
             return None
 
-        execution = self._require_execution(cancelled_operation.operation.id)
+        execution = self._require_execution(cancelled_operation.id)
         execution.state = ExecutionState.CANCELLED
         execution.outcome = ExecutionOutcome.CANCELLED
         execution.termination_reason = TerminationReason.USER_REQUEST
         execution.finish_time = datetime.now(timezone.utc)
 
-        self._request_handler.clear_request_retry_state(
-            cancelled_operation.operation.id
-        )
+        self._request_handler.clear_request_retry_state(cancelled_operation.id)
         self._emit_event(
             EventType.OPERATION_CANCELLED,
             scheduled_operation=cancelled_operation,
@@ -408,7 +390,7 @@ class OperationDispatcher:
         history_entries: list[OperationHistoryEntry] = []
 
         for scheduled_operation in history_operations:
-            operation_id = scheduled_operation.operation.id
+            operation_id = scheduled_operation.id
             execution = self._executions_by_operation_id.get(operation_id)
             if execution is None:
                 continue
@@ -485,25 +467,24 @@ class OperationDispatcher:
         self,
         event_type: EventType,
         scheduled_operation: ScheduledOperation | None = None,
-        data: EventData | dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
     ) -> DispatchEvent:
-        resolved_data = EventData() if data is None else EventData.model_validate(data)
+        resolved_payload = {} if data is None else dict(data)
+        nil_uuid = UUID(int=0)
+        operation_id = (
+            scheduled_operation.id if scheduled_operation is not None else nil_uuid
+        )
+        execution = self._executions_by_operation_id.get(operation_id)
+        execution_id = execution.id if execution is not None else nil_uuid
+
         event = DispatchEvent(
+            execution_id=execution_id,
+            operation_id=operation_id,
             event_type=event_type,
-            resource_id=(
-                scheduled_operation.resource_id
-                if scheduled_operation is not None
-                else self._dispatch_queue.resource_id
-            ),
-            operation_id=(
-                scheduled_operation.operation.id
-                if scheduled_operation is not None
-                else None
-            ),
-            data=resolved_data,
+            payload=resolved_payload,
         )
         self._append_event_history(event)
-        if event.operation_id is not None:
+        if operation_id.int != 0:
             self._append_operation_event(event.operation_id, event)
         self._log_event(event)
         self._notification_handler.notify(event)
@@ -590,14 +571,13 @@ class OperationDispatcher:
         current = self.current_scheduled_operation
         if current is None:
             return
-        execution = self._executions_by_operation_id.get(current.operation.id)
+        execution = self._executions_by_operation_id.get(current.id)
         if execution is None:
             return
         execution.state = state
 
-    def _validate_operation_model(self, operation: Operation) -> None:
-        if not isinstance(operation, self._operation_model):
-            raise TypeError(
-                "scheduled_operation.operation must be an instance of "
-                f"{self._operation_model.__name__}"
-            )
+    def _get_execution_id(self, operation_id: UUID) -> UUID | None:
+        execution = self._executions_by_operation_id.get(operation_id)
+        if execution is None:
+            return None
+        return execution.id

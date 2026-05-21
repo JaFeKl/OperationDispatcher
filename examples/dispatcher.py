@@ -6,15 +6,9 @@ from uuid import UUID
 from operation_dispatcher import (
     DispatchEvent,
     EventType,
-    Operation,
     OperationDispatcher,
     ScheduledOperation,
 )
-
-
-class WarehouseOperation(Operation):
-    name: str
-    task: str
 
 
 class CallbackDrivenDispatcher:
@@ -23,7 +17,6 @@ class CallbackDrivenDispatcher:
             resource_id="robot-1",
             on_request_callback=self.on_request,
             on_notification_callback=self.on_notification,
-            operation_model=WarehouseOperation,
             poll_interval_seconds=0.05,
         )
 
@@ -43,7 +36,7 @@ class CallbackDrivenDispatcher:
     async def _complete_operation_after_delay(self, operation_id: UUID) -> None:
         await asyncio.sleep(0.2)
         current = self.operation_dispatcher.current_scheduled_operation
-        if current is not None and current.operation.id == operation_id:
+        if current is not None and current.id == operation_id:
             self.operation_dispatcher.complete_current()
 
 
@@ -52,20 +45,20 @@ async def main() -> None:
 
     dispatcher_demo.operation_dispatcher.add(
         ScheduledOperation(
-            operation=WarehouseOperation(
-                name="move_to_station_1",
-                task="pickup",
-            ),
+            payload={
+                "name": "move_to_station_1",
+                "task": "pickup",
+            },
             resource_id="robot-1",
             priority=10,
         )
     )
     dispatcher_demo.operation_dispatcher.add(
         ScheduledOperation(
-            operation=WarehouseOperation(
-                name="move_to_charging",
-                task="charge",
-            ),
+            payload={
+                "name": "move_to_charging",
+                "task": "charge",
+            },
             resource_id="robot-1",
             priority=5,
         )
@@ -81,8 +74,7 @@ async def main() -> None:
     for (
         scheduled_operation
     ) in dispatcher_demo.operation_dispatcher.dispatch_queue.history():
-        operation = scheduled_operation.operation
-        print(f"- {operation.name}")
+        print(f"- {scheduled_operation.payload.get('name', 'unknown')}")
 
 
 if __name__ == "__main__":

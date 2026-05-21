@@ -9,12 +9,11 @@ from uuid import UUID
 
 from flask import jsonify, request
 from flasgger import swag_from
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from .models import (
     EventType,
     ExecutionState,
-    Operation,
     OperationHistoryEntry,
     ScheduledOperation,
 )
@@ -25,19 +24,16 @@ class OperationDispatcherOpenAPI:
     def __init__(
         self,
         operation_dispatcher: OperationDispatcher,
-        default_operation_name: str = "operation",
+        default_operation_name: str = "payload",
     ) -> None:
         self._operation_dispatcher = operation_dispatcher
         self._resource_id = operation_dispatcher.dispatch_queue.resource_id
         self._default_operation_name = default_operation_name
-
-        self._operation_model = operation_dispatcher.operation_model
-        self._operation_adapter: TypeAdapter[Any] = TypeAdapter(self._operation_model)
-
-        (
-            self._operation_openapi_schema,
-            self._operation_openapi_definitions,
-        ) = self._build_operation_openapi_components()
+        self._operation_openapi_schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": True,
+        }
+        self._operation_openapi_definitions: dict[str, Any] = {}
 
         self._runtime_thread: threading.Thread | None = None
         self._runtime_last_error: str | None = None
@@ -174,27 +170,25 @@ class OperationDispatcherOpenAPI:
         self,
         request_payload: dict[str, Any],
     ) -> tuple[ScheduledOperation | dict[str, Any], int]:
-        operation_payload = request_payload.get("operation")
-        if operation_payload is None:
+        payload = request_payload.get("payload")
+        if payload is None:
             return self._error_response(
-                message="operation is required",
-                code="missing_operation",
+                message="payload is required",
+                code="missing_payload",
                 status_code=400,
             )
 
-        try:
-            operation = self._normalize_operation(operation_payload)
-        except (ValidationError, TypeError, ValueError) as error:
+        if not isinstance(payload, dict):
             return self._error_response(
-                message=str(error),
-                code="invalid_operation",
+                message="payload must be an object",
+                code="invalid_payload",
                 status_code=400,
             )
 
         try:
             scheduled_operation = ScheduledOperation.model_validate(
                 {
-                    "operation": operation,
+                    "payload": payload,
                     "resource_id": request_payload.get(
                         "resource_id",
                         self._resource_id,
@@ -350,9 +344,7 @@ class OperationDispatcherOpenAPI:
                 status_code=404,
             )
 
-        cancelled_operation = self._operation_dispatcher.cancel(
-            current_operation.operation.id
-        )
+        cancelled_operation = self._operation_dispatcher.cancel(current_operation.id)
         if cancelled_operation is None:
             return self._error_response(
                 message="current operation cancellation denied",
@@ -1001,7 +993,8 @@ class OperationDispatcherOpenAPI:
             "ScheduledOperation": {
                 "type": "object",
                 "properties": {
-                    "operation": self._operation_openapi_schema,
+                    "id": {"type": "string", "format": "uuid"},
+                    "payload": self._operation_openapi_schema,
                     "resource_id": {"type": "string", "example": "resource-1"},
                     "priority": {"type": "integer", "example": 10},
                     "release_date": {
@@ -1021,7 +1014,8 @@ class OperationDispatcherOpenAPI:
                     },
                 },
                 "required": [
-                    "operation",
+                    "id",
+                    "payload",
                     "resource_id",
                     "priority",
                     "created_at",
@@ -1030,6 +1024,7 @@ class OperationDispatcherOpenAPI:
             "OperationExecution": {
                 "type": "object",
                 "properties": {
+                    "id": {"type": "string", "format": "uuid"},
                     "operation_id": {"type": "string", "format": "uuid"},
                     "state": {"type": "string"},
                     "outcome": {"type": "string"},
@@ -1039,6 +1034,7 @@ class OperationDispatcherOpenAPI:
                     "finish_time": {"type": "string", "format": "date-time"},
                 },
                 "required": [
+                    "id",
                     "operation_id",
                     "state",
                     "outcome",
@@ -1050,6 +1046,8 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
+                    "execution_id": {"type": "string", "format": "uuid"},
+                    "operation_id": {"type": "string", "format": "uuid"},
                     "event_type": {
                         "type": "string",
                         "enum": [event.value for event in EventType],
@@ -1058,16 +1056,19 @@ class OperationDispatcherOpenAPI:
                         "type": "string",
                         "format": "date-time",
                     },
-                    "resource_id": {
-                        "type": "string",
+                    "payload": {
+                        "type": "object",
+                        "additionalProperties": True,
                     },
-                    "operation_id": {
-                        "type": "string",
-                        "format": "uuid",
-                    },
-                    "data": {"$ref": "#/definitions/EventData"},
                 },
-                "required": ["id", "event_type", "created_at", "data"],
+                "required": [
+                    "id",
+                    "execution_id",
+                    "operation_id",
+                    "event_type",
+                    "created_at",
+                    "payload",
+                ],
             },
             "OperationHistoryEntry": {
                 "type": "object",
@@ -1081,25 +1082,6 @@ class OperationDispatcherOpenAPI:
                 },
                 "required": ["scheduled_operation", "execution", "events"],
             },
-            "EventData": {
-                "type": "object",
-                "properties": {
-                    "request_decision": {"$ref": "#/definitions/RequestDecision"},
-                },
-                "additionalProperties": True,
-            },
-            "RequestDecision": {
-                "type": "object",
-                "properties": {
-                    "is_allowed": {"type": "boolean"},
-                    "reason": {"type": "string"},
-                    "metadata": {
-                        "type": "object",
-                        "additionalProperties": True,
-                    },
-                },
-                "required": ["is_allowed", "metadata"],
-            },
             "OperationDispatcherState": {
                 "type": "object",
                 "properties": {
@@ -1108,7 +1090,7 @@ class OperationDispatcherOpenAPI:
                     "queue_size": {"type": "integer"},
                     "current_operation": {
                         "oneOf": [
-                            self._operation_openapi_schema,
+                            {"$ref": "#/definitions/ScheduledOperation"},
                             {"type": "null"},
                         ]
                     },
@@ -1159,14 +1141,14 @@ class OperationDispatcherOpenAPI:
             "AddOperationItem": {
                 "type": "object",
                 "properties": {
-                    "operation": self._operation_openapi_schema,
+                    "payload": self._operation_openapi_schema,
                     "resource_id": {"type": "string", "example": "resource-1"},
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
                     "planned_duration": {"type": "string"},
                     "due_date": {"type": "string", "format": "date-time"},
                 },
-                "required": ["operation"],
+                "required": ["payload"],
             },
             "CancelOperationRequest": {
                 "type": "object",
@@ -1182,39 +1164,6 @@ class OperationDispatcherOpenAPI:
 
         definitions.update(self._operation_openapi_definitions)
         return definitions
-
-    def _normalize_operation(self, operation_payload: Any) -> Operation:
-        validated_operation = self._operation_adapter.validate_python(operation_payload)
-        if isinstance(validated_operation, BaseModel):
-            return self._operation_model.model_validate(
-                validated_operation.model_dump()
-            )
-        if isinstance(validated_operation, dict):
-            return self._operation_model.model_validate(validated_operation)
-        raise TypeError("operation model must resolve to an object")
-
-    def _build_operation_openapi_components(
-        self,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        operation_schema = self._operation_adapter.json_schema()
-        operation_definitions: dict[str, Any] = {
-            definition_name: self._convert_schema_to_openapi(definition_schema)
-            for definition_name, definition_schema in operation_schema.get(
-                "$defs", {}
-            ).items()
-        }
-
-        root_schema = self._convert_schema_to_openapi(
-            {key: value for key, value in operation_schema.items() if key != "$defs"}
-        )
-
-        if "$ref" in root_schema:
-            return {"$ref": root_schema["$ref"]}, operation_definitions
-
-        definition_name = operation_schema.get("title") or "OperationModel"
-        root_schema.pop("title", None)
-        operation_definitions[definition_name] = root_schema
-        return {"$ref": f"#/definitions/{definition_name}"}, operation_definitions
 
     @classmethod
     def _convert_schema_to_openapi(cls, schema: Any) -> Any:

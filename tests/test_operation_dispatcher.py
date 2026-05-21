@@ -5,11 +5,9 @@ from operation_dispatcher import (
     EventType,
     ExecutionOutcome,
     ExecutionState,
-    Operation,
     OperationDispatcher,
     OperationHistoryEntry,
     OperationDispatcherState,
-    RequestDecision,
     ScheduledOperation,
     TerminationReason,
 )
@@ -24,7 +22,7 @@ def _scheduled_operation(
     priority: int = 0,
 ) -> ScheduledOperation:
     return ScheduledOperation(
-        operation=Operation(),
+        payload={},
         resource_id=resource_id,
         release_date=release_date,
         priority=priority,
@@ -40,9 +38,9 @@ def test_dispatcher_starts_and_completes_current_operation() -> None:
 
     assert started is scheduled_operation
     assert dispatcher.current_scheduled_operation is scheduled_operation
-    assert dispatcher.current_operation is scheduled_operation.operation
+    assert dispatcher.current_operation is scheduled_operation
 
-    execution = dispatcher.get_execution(scheduled_operation.operation.id)
+    execution = dispatcher.get_execution(scheduled_operation.id)
     assert execution is not None
     assert execution.state is ExecutionState.RUNNING
     assert execution.outcome is ExecutionOutcome.NONE
@@ -52,9 +50,7 @@ def test_dispatcher_starts_and_completes_current_operation() -> None:
     assert completed is scheduled_operation
     assert dispatcher.current_scheduled_operation is None
 
-    execution_after_complete = dispatcher.get_execution(
-        scheduled_operation.operation.id
-    )
+    execution_after_complete = dispatcher.get_execution(scheduled_operation.id)
     assert execution_after_complete is not None
     assert execution_after_complete.state is ExecutionState.COMPLETED
     assert execution_after_complete.outcome is ExecutionOutcome.SUCCESS
@@ -115,10 +111,10 @@ def test_dispatcher_cancel_queued_operation_sets_execution_cancelled() -> None:
     scheduled_operation = _scheduled_operation()
     dispatcher.add(scheduled_operation)
 
-    cancelled = dispatcher.cancel(scheduled_operation.operation.id)
+    cancelled = dispatcher.cancel(scheduled_operation.id)
 
     assert cancelled is scheduled_operation
-    execution = dispatcher.get_execution(scheduled_operation.operation.id)
+    execution = dispatcher.get_execution(scheduled_operation.id)
     assert execution is not None
     assert execution.state is ExecutionState.CANCELLED
     assert execution.outcome is ExecutionOutcome.CANCELLED
@@ -137,11 +133,11 @@ def test_dispatcher_cancel_current_operation_sets_execution_cancelled() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    cancelled = dispatcher.cancel(scheduled_operation.operation.id)
+    cancelled = dispatcher.cancel(scheduled_operation.id)
 
     assert cancelled is scheduled_operation
     assert dispatcher.current_scheduled_operation is None
-    execution = dispatcher.get_execution(scheduled_operation.operation.id)
+    execution = dispatcher.get_execution(scheduled_operation.id)
     assert execution is not None
     assert execution.state is ExecutionState.CANCELLED
 
@@ -155,7 +151,7 @@ def test_dispatcher_fail_current_sets_failed_execution() -> None:
     failed = dispatcher.fail_current()
 
     assert failed is scheduled_operation
-    execution = dispatcher.get_execution(scheduled_operation.operation.id)
+    execution = dispatcher.get_execution(scheduled_operation.id)
     assert execution is not None
     assert execution.state is ExecutionState.FAILED
     assert execution.outcome is ExecutionOutcome.FAILURE
@@ -173,7 +169,7 @@ def test_dispatcher_run_once_waits_for_release_date() -> None:
 
     assert executed is None
     assert dispatcher.current_scheduled_operation is None
-    execution = dispatcher.get_execution(scheduled_operation.operation.id)
+    execution = dispatcher.get_execution(scheduled_operation.id)
     assert execution is not None
     assert execution.state is ExecutionState.QUEUED
 
@@ -192,7 +188,7 @@ def test_dispatcher_get_state_reports_runtime_and_queue_information() -> None:
     dispatcher._start_next()
     running_state = dispatcher.get_state()
     assert running_state.current_operation is not None
-    assert running_state.current_operation.id == scheduled_operation.operation.id
+    assert running_state.current_operation.id == scheduled_operation.id
 
 
 def test_dispatcher_emits_lifecycle_events() -> None:
@@ -402,13 +398,13 @@ def test_dispatcher_pauses_when_denied_start_reaches_max_retries() -> None:
 
 
 def test_dispatcher_accepts_structured_request_decision() -> None:
-    def callback(event) -> RequestDecision | None:
+    def callback(event) -> dict[str, object] | None:
         if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
-            return RequestDecision(
-                is_allowed=True,
-                reason="policy_allowed",
-                metadata={"rule": "start_ok"},
-            )
+            return {
+                "accepted": True,
+                "reasoning": "policy_allowed",
+                "data": {"rule": "start_ok"},
+            }
         return None
 
     dispatcher = OperationDispatcher(
@@ -429,10 +425,9 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
     assert len(request_events) == 1
     request_event = request_events[0]
     assert request_event.event_type is DispatcherEventType.OPERATION_START_REQUESTED
-    assert request_event.data.request_decision is not None
-    assert request_event.data.request_decision.is_allowed is True
-    assert request_event.data.request_decision.reason == "policy_allowed"
-    assert request_event.data.request_decision.metadata == {"rule": "start_ok"}
+    assert request_event.payload["request_decision"]["accepted"] is True
+    assert request_event.payload["request_decision"]["reasoning"] == "policy_allowed"
+    assert request_event.payload["request_decision"]["data"] == {"rule": "start_ok"}
 
 
 def test_dispatcher_history_entries_include_execution_and_events() -> None:
@@ -447,10 +442,7 @@ def test_dispatcher_history_entries_include_execution_and_events() -> None:
     assert len(entries) == 1
     history_entry = entries[0]
     assert isinstance(history_entry, OperationHistoryEntry)
-    assert (
-        history_entry.scheduled_operation.operation.id
-        == scheduled_operation.operation.id
-    )
+    assert history_entry.scheduled_operation.id == scheduled_operation.id
     assert history_entry.execution.state is ExecutionState.COMPLETED
     assert any(
         event.event_type is DispatcherEventType.OPERATION_STARTED
@@ -465,13 +457,13 @@ def test_dispatcher_history_entries_include_execution_and_events() -> None:
 def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
     seen_events: list = []
 
-    def callback(event) -> RequestDecision | None:
+    def callback(event) -> dict[str, object] | None:
         if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
-            return RequestDecision(
-                is_allowed=False,
-                reason="resource_busy",
-                metadata={"resource_state": "busy"},
-            )
+            return {
+                "accepted": False,
+                "reasoning": "resource_busy",
+                "data": {"resource_state": "busy"},
+            }
         return None
 
     def notification_callback(event) -> None:
@@ -495,9 +487,8 @@ def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
     ]
     assert len(denied_events) == 1
     denied_event = denied_events[0]
-    denied_data = denied_event.data.model_dump(mode="json")
-    assert denied_data["reason"] == "resource_busy"
-    assert denied_data["decision_metadata"] == {"resource_state": "busy"}
+    assert denied_event.payload["reasoning"] == "resource_busy"
+    assert denied_event.payload["decision_data"] == {"resource_state": "busy"}
 
 
 def test_dispatcher_does_not_pause_when_pause_request_denied() -> None:

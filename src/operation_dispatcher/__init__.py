@@ -1,14 +1,13 @@
 from .models import (
+    DependencyType,
     DispatchEvent,
-    EventData,
     EventType,
     ExecutionState,
     ExecutionOutcome,
-    Operation,
+    OperationDependency,
     OperationHistoryEntry,
     OperationExecution,
     OperationDispatcherState,
-    RequestDecision,
     ScheduledOperation,
     TerminationReason,
 )
@@ -23,18 +22,17 @@ from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
 from .utils.simulated_operation_runner import SimulatedOperationRunner
 
 __all__ = [
-    "Operation",
+    "DependencyType",
     "ScheduledOperation",
+    "OperationDependency",
     "OperationHistoryEntry",
     "OperationExecution",
     "ExecutionState",
     "ExecutionOutcome",
     "TerminationReason",
     "DispatchEvent",
-    "EventData",
     "EventType",
     "OperationDispatcherState",
-    "RequestDecision",
     "DispatchQueue",
     "SortField",
     "SortDirection",
