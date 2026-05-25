@@ -17,7 +17,7 @@ def _scheduled_operation(
     priority: int = 0,
     release_date: datetime | None = None,
     due_date: datetime | None = None,
-    planned_duration: timedelta | None = None,
+    planned_duration: int | None = None,
 ) -> ScheduledOperation:
     return ScheduledOperation(
         payload={},
@@ -294,7 +294,13 @@ def test_clear_and_clear_history_only_affect_respective_buckets() -> None:
 
 def test_scheduled_operation_rejects_invalid_duration() -> None:
     with pytest.raises(ValueError, match="planned_duration must be > 0"):
-        _scheduled_operation(planned_duration=timedelta(0))
+        _scheduled_operation(planned_duration=0)
+
+
+def test_scheduled_operation_accepts_planned_duration_in_milliseconds() -> None:
+    operation = _scheduled_operation(planned_duration=1500)
+
+    assert operation.planned_duration == 1500
 
 
 def test_scheduled_operation_rejects_invalid_due_date_order() -> None:

@@ -98,6 +98,31 @@ def test_dispatcher_add_with_provided_execution_emits_added_event_with_execution
     assert added_event.execution_id == existing_execution.id
 
 
+def test_dispatcher_add_normalizes_created_at_to_utc() -> None:
+    seen_events = []
+
+    def notification_callback(event) -> None:
+        seen_events.append(event)
+
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        on_notification_callback=notification_callback,
+    )
+    scheduled_operation = ScheduledOperation(
+        payload={},
+        resource_id="resource-a",
+        created_at=datetime(2026, 5, 25, 10, 0, tzinfo=timezone(timedelta(hours=2))),
+    )
+
+    dispatcher.add(scheduled_operation)
+
+    assert scheduled_operation.created_at.tzinfo is timezone.utc
+    assert len(seen_events) == 1
+    added_event = seen_events[0]
+    assert added_event.event_type is DispatcherEventType.OPERATION_ADDED
+    assert added_event.created_at.tzinfo is timezone.utc
+
+
 def test_dispatcher_run_once_starts_operation_when_requests_allowed() -> None:
     seen_events: list[DispatcherEventType] = []
 

@@ -1002,7 +1002,9 @@ class OperationDispatcherOpenAPI:
                         "format": "date-time",
                     },
                     "planned_duration": {
-                        "type": "string",
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Planned operation duration in milliseconds.",
                     },
                     "due_date": {
                         "type": "string",
@@ -1141,11 +1143,17 @@ class OperationDispatcherOpenAPI:
             "AddOperationItem": {
                 "type": "object",
                 "properties": {
-                    "payload": self._operation_openapi_schema,
-                    "resource_id": {"type": "string", "example": "resource-1"},
+                    "payload": {
+                        **self._operation_openapi_schema,
+                        "example": {},
+                    },
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
-                    "planned_duration": {"type": "string"},
+                    "planned_duration": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Planned operation duration in milliseconds.",
+                    },
                     "due_date": {"type": "string", "format": "date-time"},
                 },
                 "required": ["payload"],

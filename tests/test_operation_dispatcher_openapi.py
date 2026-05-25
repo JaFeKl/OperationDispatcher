@@ -235,6 +235,35 @@ def test_dispatcher_openapi_definitions_include_operation_model() -> None:
     assert "AddOperationItem" in definitions
     assert definitions["AddOperationRequest"]["type"] == "array"
     assert definitions["AddOperationItem"]["properties"]["payload"]["type"] == "object"
+    assert "resource_id" not in definitions["AddOperationItem"]["properties"]
+    assert definitions["AddOperationItem"]["properties"]["payload"]["example"] == {}
+    assert (
+        definitions["ScheduledOperation"]["properties"]["planned_duration"]["type"]
+        == "integer"
+    )
+    assert (
+        definitions["AddOperationItem"]["properties"]["planned_duration"]["type"]
+        == "integer"
+    )
+
+
+def test_dispatcher_openapi_add_operation_accepts_planned_duration_in_milliseconds() -> (
+    None
+):
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    added_payload, add_status = dispatcher_api.add_operation_response(
+        [
+            {
+                "payload": {},
+                "planned_duration": 2500,
+            }
+        ]
+    )
+
+    assert add_status == 201
+    assert added_payload[0]["planned_duration"] == 2500
 
 
 def test_dispatcher_openapi_history_response_uses_limit_and_returns_newest_first() -> (

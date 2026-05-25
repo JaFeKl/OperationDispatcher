@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
+
+
+def _normalize_to_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class ExecutionState(str, Enum):
@@ -73,6 +81,11 @@ class DispatchEvent(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def normalize_created_at(self) -> "DispatchEvent":
+        self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
+        return self
+
 
 class ScheduledOperation(BaseModel):
     """
@@ -86,13 +99,17 @@ class ScheduledOperation(BaseModel):
     resource_id: str
     priority: int = 0
     release_date: datetime | None = None
-    planned_duration: timedelta | None = None
+    planned_duration: int | None = None
     due_date: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")
     def validate_scheduled_operation(self) -> "ScheduledOperation":
-        if self.planned_duration is not None and self.planned_duration <= timedelta(0):
+        self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
+        self.release_date = _normalize_to_utc(self.release_date)  # type: ignore[assignment]
+        self.due_date = _normalize_to_utc(self.due_date)  # type: ignore[assignment]
+
+        if self.planned_duration is not None and self.planned_duration <= 0:
             raise ValueError("planned_duration must be > 0")
         if (
             self.release_date is not None
@@ -146,6 +163,7 @@ class OperationDependency(BaseModel):
 
     @model_validator(mode="after")
     def validate_unique_dependency(self) -> OperationDependency:
+        self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
         if self.operation_id == self.depends_on_operation_id:
             raise ValueError("operation cannot depend on itself")
         return self
