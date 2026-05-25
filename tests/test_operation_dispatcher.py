@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from operation_dispatcher import (
     EventType,
     ExecutionOutcome,
+    OperationExecution,
     ExecutionState,
     OperationDispatcher,
     OperationHistoryEntry,
@@ -55,6 +56,46 @@ def test_dispatcher_starts_and_completes_current_operation() -> None:
     assert execution_after_complete.state is ExecutionState.COMPLETED
     assert execution_after_complete.outcome is ExecutionOutcome.SUCCESS
     assert execution_after_complete.finish_time is not None
+
+
+def test_dispatcher_add_reuses_provided_execution() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    scheduled_operation = _scheduled_operation()
+    existing_execution = OperationExecution(
+        operation_id=scheduled_operation.id,
+        state=ExecutionState.PAUSED,
+    )
+
+    dispatcher.add(scheduled_operation, execution=existing_execution)
+
+    execution = dispatcher.get_execution(scheduled_operation.id)
+    assert execution is existing_execution
+    assert execution is not None
+    assert execution.state is ExecutionState.PAUSED
+
+
+def test_dispatcher_add_with_provided_execution_emits_added_event_with_execution_id() -> (
+    None
+):
+    seen_events = []
+
+    def notification_callback(event) -> None:
+        seen_events.append(event)
+
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        on_notification_callback=notification_callback,
+    )
+    scheduled_operation = _scheduled_operation()
+    existing_execution = OperationExecution(operation_id=scheduled_operation.id)
+
+    dispatcher.add(scheduled_operation, execution=existing_execution)
+
+    assert len(seen_events) == 1
+    added_event = seen_events[0]
+    assert added_event.event_type is DispatcherEventType.OPERATION_ADDED
+    assert added_event.operation_id == scheduled_operation.id
+    assert added_event.execution_id == existing_execution.id
 
 
 def test_dispatcher_run_once_starts_operation_when_requests_allowed() -> None:

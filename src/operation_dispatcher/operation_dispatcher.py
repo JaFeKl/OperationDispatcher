@@ -6,7 +6,7 @@ import queue
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 from .dispatch_queue import DispatchQueue, SortRule
@@ -131,14 +131,27 @@ class OperationDispatcher:
     def is_stopping(self) -> bool:
         return self._stop_requested and self.is_running
 
-    def add(self, scheduled_operation: ScheduledOperation) -> None:
-        self._execute_state_mutation(lambda: self._add_internal(scheduled_operation))
-
-    def _add_internal(self, scheduled_operation: ScheduledOperation) -> None:
-        self._dispatch_queue.add(scheduled_operation)
-        self._executions_by_operation_id[scheduled_operation.id] = OperationExecution(
-            operation_id=scheduled_operation.id
+    def add(
+        self,
+        scheduled_operation: ScheduledOperation,
+        execution: Optional[OperationExecution] = None,
+    ) -> None:
+        self._execute_state_mutation(
+            lambda: self._add_internal(scheduled_operation, execution)
         )
+
+    def _add_internal(
+        self,
+        scheduled_operation: ScheduledOperation,
+        execution: Optional[OperationExecution] = None,
+    ) -> None:
+        self._dispatch_queue.add(scheduled_operation)
+        if execution is not None:
+            self._executions_by_operation_id[scheduled_operation.id] = execution
+        else:
+            self._executions_by_operation_id[scheduled_operation.id] = (
+                OperationExecution(operation_id=scheduled_operation.id)
+            )
         self._events_by_operation_id.setdefault(scheduled_operation.id, [])
         self._emit_event(
             EventType.OPERATION_ADDED,
