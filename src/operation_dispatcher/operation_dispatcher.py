@@ -28,10 +28,16 @@ from .retry_policy import RetryPolicy
 
 class OperationDispatcher:
     """
-    Runtime coordinator for one resource dispatch queue.
+    Coordinates scheduling, lifecycle transitions, and eventing for one resource queue.
 
-    Scheduling (`DispatchQueue`) and runtime execution (`OperationExecution`) are
-    intentionally separated and synchronized by scheduled operation id.
+    The dispatcher keeps scheduling concerns (`DispatchQueue`) separate from runtime
+    execution state (`OperationExecution`) and synchronizes both via scheduled
+    operation id.
+
+    When `default_planned_duration` is configured, newly added operations with no
+    `planned_duration` automatically inherit that value (milliseconds). Call
+    `add(..., apply_default_planned_duration=False)` to keep `planned_duration=None`
+    for a specific operation.
     """
 
     def __init__(
@@ -45,6 +51,7 @@ class OperationDispatcher:
         start_request_max_retries: int = 5,
         start_request_retry_cooldown_seconds: float = 1.0,
         request_event_timeout_seconds: float = 5.0,
+        default_planned_duration: int | None = None,
         dispatch_queue_sort_rules: list[SortRule] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -58,6 +65,8 @@ class OperationDispatcher:
             )
         if request_event_timeout_seconds <= 0:
             raise ValueError("request_event_timeout_seconds must be greater than 0")
+        if default_planned_duration is not None and default_planned_duration <= 0:
+            raise ValueError("default_planned_duration must be > 0")
 
         self._logger = logger
         self._dispatch_queue = DispatchQueue(
@@ -80,6 +89,7 @@ class OperationDispatcher:
         self._wakeup_event: asyncio.Event | None = None
         self._event_history: list[DispatchEvent] = []
         self._event_history_limit = 1000
+        self._default_planned_duration = default_planned_duration
 
         self._notification_handler = NotificationHandler(
             on_notification_callback=on_notification_callback,
@@ -135,16 +145,29 @@ class OperationDispatcher:
         self,
         scheduled_operation: ScheduledOperation,
         execution: Optional[OperationExecution] = None,
+        apply_default_planned_duration: bool = True,
     ) -> None:
         self._execute_state_mutation(
-            lambda: self._add_internal(scheduled_operation, execution)
+            lambda: self._add_internal(
+                scheduled_operation,
+                execution,
+                apply_default_planned_duration,
+            )
         )
 
     def _add_internal(
         self,
         scheduled_operation: ScheduledOperation,
         execution: Optional[OperationExecution] = None,
+        apply_default_planned_duration: bool = True,
     ) -> None:
+        if (
+            apply_default_planned_duration
+            and scheduled_operation.planned_duration is None
+            and self._default_planned_duration is not None
+        ):
+            scheduled_operation.planned_duration = self._default_planned_duration
+
         self._dispatch_queue.add(scheduled_operation)
         if execution is not None:
             self._executions_by_operation_id[scheduled_operation.id] = execution

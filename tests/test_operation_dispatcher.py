@@ -21,12 +21,14 @@ def _scheduled_operation(
     resource_id: str = "resource-a",
     release_date: datetime | None = None,
     priority: int = 0,
+    planned_duration: int | None = None,
 ) -> ScheduledOperation:
     return ScheduledOperation(
         payload={},
         resource_id=resource_id,
         release_date=release_date,
         priority=priority,
+        planned_duration=planned_duration,
     )
 
 
@@ -72,6 +74,56 @@ def test_dispatcher_add_reuses_provided_execution() -> None:
     assert execution is existing_execution
     assert execution is not None
     assert execution.state is ExecutionState.PAUSED
+
+
+def test_dispatcher_add_applies_default_planned_duration() -> None:
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        default_planned_duration=500,
+    )
+    scheduled_operation = _scheduled_operation(planned_duration=None)
+
+    dispatcher.add(scheduled_operation)
+
+    added = dispatcher.get_scheduled_operation(scheduled_operation.id)
+    assert added is not None
+    assert added.planned_duration == 500
+
+
+def test_dispatcher_add_keeps_explicit_planned_duration() -> None:
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        default_planned_duration=500,
+    )
+    scheduled_operation = _scheduled_operation(planned_duration=1200)
+
+    dispatcher.add(scheduled_operation)
+
+    added = dispatcher.get_scheduled_operation(scheduled_operation.id)
+    assert added is not None
+    assert added.planned_duration == 1200
+
+
+def test_dispatcher_add_can_skip_default_planned_duration() -> None:
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        default_planned_duration=500,
+    )
+    scheduled_operation = _scheduled_operation(planned_duration=None)
+
+    dispatcher.add(scheduled_operation, apply_default_planned_duration=False)
+
+    added = dispatcher.get_scheduled_operation(scheduled_operation.id)
+    assert added is not None
+    assert added.planned_duration is None
+
+
+def test_dispatcher_rejects_non_positive_default_planned_duration() -> None:
+    try:
+        OperationDispatcher(resource_id="resource-a", default_planned_duration=0)
+        assert False, "expected ValueError"
+    except ValueError as error:
+        assert str(error) == "default_planned_duration must be > 0"
 
 
 def test_dispatcher_add_with_provided_execution_emits_added_event_with_execution_id() -> (
