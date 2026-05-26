@@ -45,6 +45,15 @@ def main() -> None:
     for scheduled_operation in dispatch_queue.history():
         print(f"- {scheduled_operation.payload.get('name', 'unknown')}")
 
+    second = dispatch_queue.next()
+    if second is not None:
+        print(f"\nPulled: {second.payload.get('name', 'unknown')}")
+        dispatch_queue.complete(second)
+
+    print("\nCompleted history:")
+    for scheduled_operation in dispatch_queue.history():
+        print(f"- {scheduled_operation.payload.get('name', 'unknown')}")
+
 
 if __name__ == "__main__":
     main()

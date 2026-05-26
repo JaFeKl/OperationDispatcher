@@ -10,6 +10,7 @@ from flask import Flask, jsonify
 from flasgger import Swagger
 
 from operation_dispatcher import (
+    BrowserEventVisualizer,
     DispatchEvent,
     EventType,
     OperationDispatcher,
@@ -22,10 +23,6 @@ from operation_dispatcher import SimulatedOperationRunner
 class DemoDispatcherService:
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
-        self._simulated_runner = SimulatedOperationRunner(
-            on_complete=self._on_completed,
-            logger=logger,
-        )
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
@@ -37,6 +34,19 @@ class DemoDispatcherService:
             logger=logger,
         )
 
+        self._visualizer = BrowserEventVisualizer(
+            host="0.0.0.0",
+            port=8765,
+            operation_dispatcher=self.operation_dispatcher,
+        )
+        self._visualizer.start()
+
+        self._simulated_runner = SimulatedOperationRunner(
+            on_complete=self._on_completed,
+            logger=logger,
+        )
+
+    def add_demo_operations(self) -> None:
         self.operation_dispatcher.add(
             ScheduledOperation(
                 payload={
@@ -66,6 +76,7 @@ class DemoDispatcherService:
 
     def _on_request_handler(self, event: DispatchEvent) -> bool | None:
         """Request callback for all dispatcher events."""
+        self._visualizer.on_request(event)
 
         scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
             event.operation_id
@@ -129,6 +140,7 @@ class DemoDispatcherService:
         In a real implementation, this could be used to trigger side effects in
         response to state changes in the dispatcher, e.g. updating a dashboard or triggering other actions in the system.
         """
+        self._visualizer.on_notification(event)
         self._logger.info(
             f"Received event {event.event_type} for operation_id {event.operation_id}"
         )
@@ -170,7 +182,7 @@ class DemoDispatcherService:
                 }
             ],
             "swagger_ui": True,
-            "specs_route": "/docs/",
+            "specs_route": "/",
             "static_url_path": "/flasgger_static",
         }
         Swagger(app, template=swagger_template, config=swagger_config)
@@ -190,13 +202,22 @@ class DemoDispatcherService:
 
         return app
 
+    def shutdown(self) -> None:
+        self._simulated_runner.cancel()
+        self._visualizer.stop()
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
     demo_dispatcher = DemoDispatcherService(logger=logger)
+    demo_dispatcher.add_demo_operations()
+
+    logger.info("Event visualizer available at http://127.0.0.1:8765")
+
     app = demo_dispatcher.create_app()
-    logger.info("Starting Flask demo on http://localhost:8000")
-    logger.info("Open docs at http://localhost:8000/docs/")
-    app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)
+    try:
+        app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)
+    finally:
+        demo_dispatcher.shutdown()

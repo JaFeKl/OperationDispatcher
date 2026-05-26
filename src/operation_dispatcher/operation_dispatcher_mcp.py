@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -29,9 +32,19 @@ class OperationDispatcherMCPServer:
         host: str = "127.0.0.1",
         port: int = 8000,
         json_response: bool = True,
+        manage_dispatcher_runtime: bool = True,
+        runtime_startup_timeout_seconds: float = 1.0,
+        runtime_stop_join_timeout_seconds: float = 2.0,
         **fastmcp_kwargs: Any,
     ) -> None:
         self._operation_dispatcher = operation_dispatcher
+        self._manage_dispatcher_runtime = manage_dispatcher_runtime
+        self._runtime_startup_timeout_seconds = runtime_startup_timeout_seconds
+        self._runtime_stop_join_timeout_seconds = runtime_stop_join_timeout_seconds
+        self._runtime_thread: threading.Thread | None = None
+        self._runtime_last_error: str | None = None
+        self._runtime_lock = threading.Lock()
+
         self._mcp = FastMCP(
             name=name,
             instructions=instructions,
@@ -46,6 +59,10 @@ class OperationDispatcherMCPServer:
     @property
     def operation_dispatcher(self) -> OperationDispatcher:
         return self._operation_dispatcher
+
+    @property
+    def manages_dispatcher_runtime(self) -> bool:
+        return self._manage_dispatcher_runtime
 
     @property
     def app(self) -> FastMCP:
@@ -70,11 +87,114 @@ class OperationDispatcherMCPServer:
     def _create_lifespan(self):
         @asynccontextmanager
         async def lifespan(_: FastMCP) -> AsyncIterator[OperationDispatcherMCPContext]:
-            yield OperationDispatcherMCPContext(
-                operation_dispatcher=self._operation_dispatcher
-            )
+            try:
+                yield OperationDispatcherMCPContext(
+                    operation_dispatcher=self._operation_dispatcher
+                )
+            finally:
+                if self._manage_dispatcher_runtime:
+                    self.stop_dispatcher_runtime()
 
         return lifespan
+
+    def _dispatcher_state_payload(self) -> dict[str, Any]:
+        state = self._operation_dispatcher.get_state().model_dump(mode="json")
+        state["runtime_thread_alive"] = (
+            self._runtime_thread.is_alive()
+            if self._runtime_thread is not None
+            else False
+        )
+        state["runtime_last_error"] = self._runtime_last_error
+        state["runtime_managed_by"] = (
+            "mcp" if self._manage_dispatcher_runtime else "external"
+        )
+        return state
+
+    def start_dispatcher_runtime(self) -> dict[str, Any]:
+        if not self._manage_dispatcher_runtime:
+            return {
+                "message": "dispatcher runtime is managed externally",
+                "state": self._dispatcher_state_payload(),
+            }
+
+        with self._runtime_lock:
+            if self._operation_dispatcher.is_running:
+                return {
+                    "message": "operation dispatcher is already running",
+                    "state": self._dispatcher_state_payload(),
+                }
+
+            if self._runtime_thread is not None and self._runtime_thread.is_alive():
+                return {
+                    "message": "operation dispatcher runtime thread already active",
+                    "state": self._dispatcher_state_payload(),
+                }
+
+            self._runtime_last_error = None
+
+            def run_operation_dispatcher() -> None:
+                try:
+                    asyncio.run(self._operation_dispatcher.run())
+                except Exception as error:
+                    self._runtime_last_error = str(error)
+
+            self._runtime_thread = threading.Thread(
+                target=run_operation_dispatcher,
+                name="OperationDispatcherMCPRuntimeThread",
+                daemon=True,
+            )
+            self._runtime_thread.start()
+
+        deadline = time.time() + self._runtime_startup_timeout_seconds
+        while not self._operation_dispatcher.is_running and time.time() < deadline:
+            time.sleep(0.01)
+
+        state = self._dispatcher_state_payload()
+        if self._operation_dispatcher.is_running:
+            return {
+                "message": "operation dispatcher started",
+                "state": state,
+            }
+
+        if self._runtime_last_error:
+            return {
+                "message": "operation dispatcher failed to start",
+                "state": state,
+                "error": self._runtime_last_error,
+            }
+
+        return {
+            "message": "operation dispatcher start requested",
+            "state": state,
+        }
+
+    def stop_dispatcher_runtime(self) -> dict[str, Any]:
+        if not self._manage_dispatcher_runtime:
+            return {
+                "message": "dispatcher runtime is managed externally",
+                "state": self._dispatcher_state_payload(),
+            }
+
+        with self._runtime_lock:
+            runtime_active = (
+                self._runtime_thread is not None and self._runtime_thread.is_alive()
+            )
+            if not self._operation_dispatcher.is_running and not runtime_active:
+                return {
+                    "message": "operation dispatcher is not running",
+                    "state": self._dispatcher_state_payload(),
+                }
+
+            self._operation_dispatcher.request_stop()
+            runtime_thread = self._runtime_thread
+
+        if runtime_thread is not None and runtime_thread.is_alive():
+            runtime_thread.join(timeout=self._runtime_stop_join_timeout_seconds)
+
+        return {
+            "message": "operation dispatcher stopped",
+            "state": self._dispatcher_state_payload(),
+        }
 
     def _register_base_tools(self) -> None:
         @self._mcp.tool(
@@ -82,7 +202,23 @@ class OperationDispatcherMCPServer:
             description="Return the current state of the shared operation dispatcher.",
         )
         def get_dispatcher_state() -> dict[str, Any]:
-            return self._operation_dispatcher.get_state().model_dump(mode="json")
+            return self._dispatcher_state_payload()
+
+        if self._manage_dispatcher_runtime:
+
+            @self._mcp.tool(
+                name="start_operation_dispatcher",
+                description="Start the shared operation dispatcher runtime.",
+            )
+            def start_operation_dispatcher() -> dict[str, Any]:
+                return self.start_dispatcher_runtime()
+
+            @self._mcp.tool(
+                name="stop_operation_dispatcher",
+                description="Stop the shared operation dispatcher runtime.",
+            )
+            def stop_operation_dispatcher() -> dict[str, Any]:
+                return self.stop_dispatcher_runtime()
 
 
 def create_operation_dispatcher_mcp_server(
