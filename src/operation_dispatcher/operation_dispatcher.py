@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import queue
 import threading
@@ -9,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from .dispatch_queue import DispatchQueue, SortRule
-from .models import (
+from operation_dispatcher.dispatch_queue import DispatchQueue, SortRule
+from operation_dispatcher.models import (
     DispatchEvent,
     EventType,
     ExecutionOutcome,
@@ -22,27 +23,20 @@ from .models import (
     ScheduledOperation,
     TerminationReason,
 )
-from .notification_handler import NotificationHandler
-from .request_handler import RequestHandler
-from .retry_policy import RetryPolicy
+from operation_dispatcher.notification_handler import NotificationHandler
+from operation_dispatcher.request_handler import RequestHandler
+from operation_dispatcher.retry_policy import RetryPolicy
+
+
+@dataclass(frozen=True)
+class _CommandResult:
+    accepted: bool
+    scheduled_operation: ScheduledOperation | None = None
 
 
 class OperationDispatcher:
     """
-    Coordinates scheduling, lifecycle transitions, and eventing for one resource queue.
-
-    The dispatcher keeps scheduling concerns (`DispatchQueue`) separate from runtime
-    execution state (`OperationExecution`) and synchronizes both via scheduled
-    operation id.
-
-    When `default_planned_duration` is configured, newly added operations with no
-    `planned_duration` automatically inherit that value (milliseconds). Call
-    `add(..., apply_default_planned_duration=False)` to keep `planned_duration=None`
-    for a specific operation.
-
-    `on_history_callback` can be provided to fetch/augment history from an external
-    source (for example a database). The callback receives `(limit, in_memory_history)`
-    and may return `OperationHistory` or None.
+    Core operation dispatcher class responsible for managing the operation schedule, execution state, and event dispatching.
     """
 
     def __init__(
@@ -115,7 +109,7 @@ class OperationDispatcher:
             emit_event=self._emit_event,
             log_event=self._log_event,
             notify_wakeup=self._notify_wakeup,
-            pause=self.pause,
+            pause=self.pause_dispatcher_runtime,
         )
 
     @property
@@ -125,10 +119,6 @@ class OperationDispatcher:
     @property
     def current_scheduled_operation(self) -> ScheduledOperation | None:
         return self._dispatch_queue.pulled_operation
-
-    @property
-    def current_operation(self) -> ScheduledOperation | None:
-        return self.current_scheduled_operation
 
     @property
     def current_execution(self) -> OperationExecution | None:
@@ -207,12 +197,12 @@ class OperationDispatcher:
             is_running=self.is_running,
             is_paused=self._is_paused,
             queue_size=len(self._dispatch_queue),
-            current_operation=self.current_operation,
+            current_operation=self.current_scheduled_operation,
             running_since=running_since,
             uptime_seconds=uptime_seconds,
         )
 
-    def pause(self) -> None:
+    def pause_dispatcher_runtime(self) -> None:
         self._execute_state_mutation(self._pause_internal)
 
     def _pause_internal(self) -> None:
@@ -220,21 +210,12 @@ class OperationDispatcher:
         self._set_current_execution_state(ExecutionState.PAUSED)
         self._emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
 
-    def resume(self) -> None:
+    def resume_dispatcher_runtime(self) -> None:
         self._execute_state_mutation(self._resume_internal)
 
     def _resume_internal(self) -> None:
-        current = self.current_scheduled_operation
-        if current is not None:
-            if not self._request_handler.request_operation_with_retry_sync(
-                current,
-                EventType.OPERATION_RESUME_REQUESTED,
-            ):
-                return
-
         self._request_handler.clear_all_request_retry_state()
         self._is_paused = False
-        self._set_current_execution_state(ExecutionState.RUNNING)
         self._emit_event(EventType.OPERATION_DISPATCHER_RESUMED)
 
     def _start_next(self) -> ScheduledOperation | None:
@@ -248,10 +229,11 @@ class OperationDispatcher:
         if scheduled_operation is None:
             return None
 
-        execution = self._require_execution(scheduled_operation.id)
-        execution.state = ExecutionState.RUNNING
-        if execution.start_time is None:
-            execution.start_time = datetime.now(timezone.utc)
+        self._transition_execution(
+            scheduled_operation,
+            state=ExecutionState.RUNNING,
+            set_start_time_if_missing=True,
+        )
 
         self._emit_event(
             EventType.OPERATION_STARTED,
@@ -322,11 +304,13 @@ class OperationDispatcher:
 
     def _complete_current_internal(self) -> ScheduledOperation:
         scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.id)
-        execution.state = ExecutionState.COMPLETED
-        execution.outcome = ExecutionOutcome.SUCCESS
-        execution.termination_reason = TerminationReason.NONE
-        execution.finish_time = datetime.now(timezone.utc)
+        self._transition_execution(
+            scheduled_operation,
+            state=ExecutionState.COMPLETED,
+            outcome=ExecutionOutcome.SUCCESS,
+            termination_reason=TerminationReason.NONE,
+            set_finish_time=True,
+        )
 
         self._dispatch_queue.complete(scheduled_operation)
         self._emit_event(
@@ -340,11 +324,13 @@ class OperationDispatcher:
 
     def _fail_current_internal(self) -> ScheduledOperation:
         scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.id)
-        execution.state = ExecutionState.FAILED
-        execution.outcome = ExecutionOutcome.FAILURE
-        execution.termination_reason = TerminationReason.INTERNAL_ERROR
-        execution.finish_time = datetime.now(timezone.utc)
+        self._transition_execution(
+            scheduled_operation,
+            state=ExecutionState.FAILED,
+            outcome=ExecutionOutcome.FAILURE,
+            termination_reason=TerminationReason.INTERNAL_ERROR,
+            set_finish_time=True,
+        )
 
         self._dispatch_queue.complete(scheduled_operation)
         self._emit_event(
@@ -353,74 +339,101 @@ class OperationDispatcher:
         )
         return scheduled_operation
 
-    def pause_current(self) -> bool:
-        return self._execute_state_mutation(self._pause_current_internal)
+    def pause_current_operation(self, enforce_running_state: bool = True) -> bool:
+        result: _CommandResult = self._execute_state_mutation(
+            lambda: self._pause_current_internal(enforce_running_state)
+        )
+        return result.accepted
 
-    def _pause_current_internal(self) -> bool:
+    def _pause_current_internal(self, enforce_running_state: bool) -> _CommandResult:
         scheduled_operation = self._require_current_scheduled_operation()
         execution = self._require_execution(scheduled_operation.id)
-        if execution.state is not ExecutionState.RUNNING:
+        if enforce_running_state and execution.state is not ExecutionState.RUNNING:
             raise RuntimeError("current operation is not running")
 
         if not self._request_handler.request_operation_with_retry_sync(
             scheduled_operation,
             EventType.OPERATION_PAUSE_REQUESTED,
         ):
-            return False
+            return _CommandResult(False, scheduled_operation)
 
-        self._is_paused = True
-        execution.state = ExecutionState.PAUSED
-
-        self._emit_event(
-            EventType.OPERATION_DISPATCHER_PAUSED,
-            scheduled_operation=scheduled_operation,
+        self._transition_execution(
+            scheduled_operation,
+            state=ExecutionState.PAUSED,
         )
         self._emit_event(
             EventType.OPERATION_PAUSED,
             scheduled_operation=scheduled_operation,
         )
-        return True
+        return _CommandResult(True, scheduled_operation)
 
-    def request_resume_current(self) -> bool:
-        return self._execute_state_mutation(self._request_resume_current_internal)
+    def resume_current_operation(self, enforce_paused_state: bool = True) -> bool:
+        result: _CommandResult = self._execute_state_mutation(
+            lambda: self._resume_current_internal(enforce_paused_state)
+        )
+        return result.accepted
 
-    def _request_resume_current_internal(self) -> bool:
+    def _resume_current_internal(self, enforce_paused_state: bool) -> _CommandResult:
         scheduled_operation = self._require_current_scheduled_operation()
-        return self._request_handler.request_operation_with_retry_sync(
+        execution = self._require_execution(scheduled_operation.id)
+        if enforce_paused_state and execution.state is not ExecutionState.PAUSED:
+            raise RuntimeError("current operation is not paused")
+
+        accepted = self._request_handler.request_operation_with_retry_sync(
             scheduled_operation,
             EventType.OPERATION_RESUME_REQUESTED,
         )
 
-    def cancel(self, operation_id: UUID) -> ScheduledOperation | None:
-        return self._execute_state_mutation(lambda: self._cancel_internal(operation_id))
+        if not accepted:
+            return _CommandResult(False, scheduled_operation)
 
-    def _cancel_internal(self, operation_id: UUID) -> ScheduledOperation | None:
+        self._transition_execution(
+            scheduled_operation,
+            state=ExecutionState.RUNNING,
+        )
+        self._emit_event(
+            EventType.OPERATION_RESUMED,
+            scheduled_operation=scheduled_operation,
+        )
+        return _CommandResult(True, scheduled_operation)
+
+    def cancel(self, operation_id: UUID) -> ScheduledOperation | None:
+        result: _CommandResult = self._execute_state_mutation(
+            lambda: self._cancel_internal(operation_id)
+        )
+        if not result.accepted:
+            return None
+        return result.scheduled_operation
+
+    def _cancel_internal(self, operation_id: UUID) -> _CommandResult:
         scheduled_operation = self.get_scheduled_operation(operation_id)
         if scheduled_operation is None:
-            return None
+            return _CommandResult(False)
 
         if not self._request_handler.request_operation_with_retry_sync(
             scheduled_operation,
             EventType.OPERATION_CANCEL_REQUESTED,
         ):
-            return None
+            return _CommandResult(False, scheduled_operation)
 
         cancelled_operation = self._dispatch_queue.cancel(operation_id)
         if cancelled_operation is None:
-            return None
+            return _CommandResult(False, scheduled_operation)
 
-        execution = self._require_execution(cancelled_operation.id)
-        execution.state = ExecutionState.CANCELLED
-        execution.outcome = ExecutionOutcome.CANCELLED
-        execution.termination_reason = TerminationReason.USER_REQUEST
-        execution.finish_time = datetime.now(timezone.utc)
+        self._transition_execution(
+            cancelled_operation,
+            state=ExecutionState.CANCELLED,
+            outcome=ExecutionOutcome.CANCELLED,
+            termination_reason=TerminationReason.USER_REQUEST,
+            set_finish_time=True,
+        )
 
         self._request_handler.clear_request_retry_state(cancelled_operation.id)
         self._emit_event(
             EventType.OPERATION_CANCELLED,
             scheduled_operation=cancelled_operation,
         )
-        return cancelled_operation
+        return _CommandResult(True, cancelled_operation)
 
     def get_event_history(self, limit: int | None = None) -> list[DispatchEvent]:
         if limit is None:
@@ -632,6 +645,28 @@ class OperationDispatcher:
         execution = self._executions_by_operation_id.get(operation_id)
         if execution is None:
             raise RuntimeError(f"missing execution state for operation {operation_id}")
+        return execution
+
+    def _transition_execution(
+        self,
+        scheduled_operation: ScheduledOperation,
+        *,
+        state: ExecutionState,
+        outcome: ExecutionOutcome | None = None,
+        termination_reason: TerminationReason | None = None,
+        set_finish_time: bool = False,
+        set_start_time_if_missing: bool = False,
+    ) -> OperationExecution:
+        execution = self._require_execution(scheduled_operation.id)
+        execution.state = state
+        if outcome is not None:
+            execution.outcome = outcome
+        if termination_reason is not None:
+            execution.termination_reason = termination_reason
+        if set_start_time_if_missing and execution.start_time is None:
+            execution.start_time = datetime.now(timezone.utc)
+        if set_finish_time:
+            execution.finish_time = datetime.now(timezone.utc)
         return execution
 
     def _set_current_execution_state(self, state: ExecutionState) -> None:

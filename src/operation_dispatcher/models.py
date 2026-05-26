@@ -60,6 +60,7 @@ class EventType(str, Enum):
     OPERATION_COMPLETED = "operation_completed"
     OPERATION_FAILED = "operation_failed"
     OPERATION_PAUSED = "operation_paused"
+    OPERATION_RESUMED = "operation_resumed"
     OPERATION_CANCELLED = "operation_cancelled"
 
 

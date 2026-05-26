@@ -15,6 +15,7 @@ from .models import (
 from .dispatch_queue import DispatchQueue, SortDirection, SortField, SortRule
 from .operation_dispatcher import OperationDispatcher
 from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
+from .runtime_controller import OperationDispatcherRuntimeController
 from .utils.simulated_operation_runner import SimulatedOperationRunner
 from .visualization import BrowserEventVisualizer
 
@@ -52,6 +53,7 @@ __all__ = [
     "SortRule",
     "OperationDispatcher",
     "OperationDispatcherOpenAPI",
+    "OperationDispatcherRuntimeController",
     "SimulatedOperationRunner",
     "BrowserEventVisualizer",
 ]

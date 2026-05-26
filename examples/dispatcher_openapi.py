@@ -21,7 +21,7 @@ from operation_dispatcher import SimulatedOperationRunner
 
 
 class DemoDispatcherService:
-    def __init__(self, logger: logging.Logger | None = None) -> None:
+    def __init__(self, host: str, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
 
         self.operation_dispatcher = OperationDispatcher(
@@ -35,11 +35,12 @@ class DemoDispatcherService:
         )
 
         self._visualizer = BrowserEventVisualizer(
-            host="0.0.0.0",
+            host=host,
             port=8765,
             operation_dispatcher=self.operation_dispatcher,
         )
         self._visualizer.start()
+        logger.info("Event visualizer available at http://{}:8765".format(host))
 
         self._simulated_runner = SimulatedOperationRunner(
             on_complete=self._on_completed,
@@ -77,6 +78,9 @@ class DemoDispatcherService:
     def _on_request_handler(self, event: DispatchEvent) -> bool | None:
         """Request callback for all dispatcher events."""
         self._visualizer.on_request(event)
+        self._logger.info(
+            f"Received request {event.event_type} for operation_id {event.operation_id}"
+        )
 
         scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
             event.operation_id
@@ -211,13 +215,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    demo_dispatcher = DemoDispatcherService(logger=logger)
-    demo_dispatcher.add_demo_operations()
+    host = "0.0.0.0"
 
-    logger.info("Event visualizer available at http://127.0.0.1:8765")
+    demo_dispatcher = DemoDispatcherService(host=host, logger=logger)
+    demo_dispatcher.add_demo_operations()
 
     app = demo_dispatcher.create_app()
     try:
-        app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False)
+        app.run(host=host, port=8000, debug=False, use_reloader=False)
     finally:
         demo_dispatcher.shutdown()

@@ -1,78 +1,209 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import sys
 import threading
-import time
-from pathlib import Path
 from uuid import UUID
 
-from flask import Flask
+from flask import Flask, jsonify
 from flasgger import Swagger
 
 from operation_dispatcher import (
+    BrowserEventVisualizer,
     DispatchEvent,
     EventType,
     OperationDispatcher,
     OperationDispatcherMCPServer,
     OperationDispatcherOpenAPI,
     ScheduledOperation,
+    SimulatedOperationRunner,
 )
 
 
-class MyDispatcherService:
+class DemoDispatcherDualInterfaceService:
     """
-    Example service demonstrating a shared `OperationDispatcher` with both an MCP interface and a Flask REST API interface.
+    Example service demonstrating a shared `OperationDispatcher` with both
+    OpenAPI (Flask) and MCP interfaces.
+
+    Runtime ownership is centralized in `OperationDispatcherOpenAPI`. MCP receives
+    the same OpenAPI runtime owner instance and exposes lifecycle tools
+    automatically.
     """
 
-    def __init__(self, logger: logging.Logger | None = None) -> None:
+    def __init__(self, host: str, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
-        self._completion_timers: dict[UUID, threading.Timer] = {}
-        self._runtime_thread: threading.Thread | None = None
 
         self.operation_dispatcher = OperationDispatcher(
-            resource_id="demo_resource_1",
-            on_request_callback=self._on_request,
-            on_notification_callback=self._on_notification,
+            resource_id="robot-1",
+            on_request_callback=self._on_request_handler,
+            on_notification_callback=self._on_notification_handler,
+            start_request_max_retries=3,
+            start_request_retry_cooldown_seconds=1.0,
+            request_event_timeout_seconds=2.0,
             logger=self._logger,
         )
 
-    def seed_operations(self) -> None:
+        self._visualizer = BrowserEventVisualizer(
+            host=host,
+            port=8765,
+            operation_dispatcher=self.operation_dispatcher,
+        )
+        self._visualizer.start()
+
+        self._simulated_runner = SimulatedOperationRunner(
+            on_complete=self._on_completed,
+            logger=logger,
+        )
+
+        self.operation_dispatcher_api = OperationDispatcherOpenAPI(
+            self.operation_dispatcher,
+        )
+
+    def add_demo_operations(self) -> None:
         self.operation_dispatcher.add(
             ScheduledOperation(
-                payload={"name": "pickup", "run_seconds": 3.0},
+                payload={
+                    "name": "pickup_pallet",
+                    "source_station": "INBOUND_A",
+                    "target_station": "BUFFER_01",
+                    "pallet_id": "PALLET-1001",
+                    "run_seconds": 10.0,
+                },
                 resource_id="robot-1",
-                priority=10,
+                priority=0,
             )
         )
         self.operation_dispatcher.add(
             ScheduledOperation(
-                payload={"name": "dropoff", "run_seconds": 5.0},
+                payload={
+                    "name": "dropoff_pallet",
+                    "source_station": "BUFFER_01",
+                    "target_station": "OUTBOUND_B",
+                    "pallet_id": "PALLET-1001",
+                    "run_seconds": 10.0,
+                },
                 resource_id="robot-1",
-                priority=5,
+                priority=0,
             )
         )
 
-    def create_flask_app(self) -> Flask:
-        app = Flask(__name__)
+    def _on_request_handler(self, event: DispatchEvent) -> bool | None:
+        self._visualizer.on_request(event)
+
+        scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
+            event.operation_id
+        )
+        if scheduled_operation is None:
+            self._logger.warning(
+                "received request event for unknown operation_id %s",
+                event.operation_id,
+            )
+            return None
+
+        if event.event_type is EventType.OPERATION_START_REQUESTED:
+            try:
+                self._simulated_runner.start(
+                    operation_id=scheduled_operation.id,
+                    run_seconds=float(
+                        scheduled_operation.payload.get("run_seconds", 5.0)
+                    ),
+                )
+                return True
+            except RuntimeError as error:
+                self._logger.warning(
+                    "start request failed for operation %s with error: %s",
+                    event.operation_id,
+                    error,
+                )
+                return False
+
+        if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
+            try:
+                self._simulated_runner.cancel(operation_id=scheduled_operation.id)
+                return True
+            except RuntimeError as error:
+                self._logger.warning(
+                    "cancel request failed for operation %s with error: %s",
+                    event.operation_id,
+                    error,
+                )
+                return False
+
+        if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
+            try:
+                self._simulated_runner.pause(operation_id=scheduled_operation.id)
+                return True
+            except RuntimeError as error:
+                self._logger.warning(
+                    "pause request failed for operation %s with error: %s",
+                    event.operation_id,
+                    error,
+                )
+                return False
+
+        if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
+            try:
+                self._simulated_runner.resume(operation_id=scheduled_operation.id)
+                return True
+            except RuntimeError as error:
+                self._logger.warning(
+                    "resume request failed for operation %s with error: %s",
+                    event.operation_id,
+                    error,
+                )
+                return False
+
+        return None
+
+    def _on_notification_handler(self, event: DispatchEvent) -> None:
+        self._visualizer.on_notification(event)
+        self._logger.info(
+            "Received event %s for operation_id %s",
+            event.event_type,
+            event.operation_id,
+        )
+
+    def _on_completed(self, operation_id: UUID) -> None:
+        current_operation = self.operation_dispatcher.current_scheduled_operation
+        if current_operation is None or current_operation.id != operation_id:
+            self._logger.warning(
+                "simulated completion callback received for non-current operation_id %s",
+                operation_id,
+            )
+            return
+
+        self.operation_dispatcher.complete_current()
+
+    def create_app(self) -> Flask:
+        app = Flask(__name__, static_url_path="/app_static")
+
         operation_dispatcher_api = OperationDispatcherOpenAPI(
             self.operation_dispatcher,
-            default_operation_name="demo_operation",
         )
 
-        Swagger(
-            app,
-            template={
-                "swagger": "2.0",
-                "info": {
-                    "title": "Shared Operation Dispatcher API",
-                    "version": "1.0.0",
-                    "description": "Flask API backed by the same OperationDispatcher used by the MCP server.",
-                },
-                "definitions": operation_dispatcher_api.get_openapi_definitions(),
+        swagger_template = {
+            "swagger": "2.0",
+            "info": {
+                "title": "Operation Dispatcher API",
+                "version": "1.0.0",
+                "description": "Example Flask API exposing operation dispatcher endpoints.",
             },
-        )
+            "definitions": operation_dispatcher_api.get_openapi_definitions(),
+        }
+        swagger_config = {
+            "headers": [],
+            "specs": [
+                {
+                    "endpoint": "openapi",
+                    "route": "/openapi.json",
+                    "rule_filter": lambda rule: True,
+                    "model_filter": lambda tag: True,
+                }
+            ],
+            "swagger_ui": True,
+            "specs_route": "/",
+            "static_url_path": "/flasgger_static",
+        }
+        Swagger(app, template=swagger_template, config=swagger_config)
         operation_dispatcher_api.register_default_endpoints(app)
         return app
 
@@ -83,68 +214,41 @@ class MyDispatcherService:
         port: int = 8000,
     ) -> OperationDispatcherMCPServer:
         return OperationDispatcherMCPServer(
-            self.operation_dispatcher,
+            self.operation_dispatcher_api,
             name="Shared Operation Dispatcher MCP",
             instructions=(
-                "Expose the shared operation dispatcher state. Additional tools can "
-                "be registered on this server before startup."
+                "Expose and control the shared operation dispatcher state. "
+                "Lifecycle is delegated to the shared OpenAPI runtime controller."
             ),
             host=host,
             port=port,
             json_response=True,
         )
 
-    def _on_request(self, event: DispatchEvent) -> bool | None:
-        """Request callback"""
-        return True
-
-    def _on_notification(self, event: DispatchEvent) -> None:
-        """Notification callback"""
-        pass
-
-    def _schedule_completion(self, operation_id: UUID) -> None:
-        current_operation = self.operation_dispatcher.current_operation
-        if current_operation is None or current_operation.id != operation_id:
-            return
-
-        delay_seconds = max(
-            0.1, float(current_operation.payload.get("run_seconds", 1.0))
-        )
-        timer = threading.Timer(
-            delay_seconds,
-            self._complete_if_current,
-            args=(operation_id,),
-        )
-        timer.daemon = True
-
-        previous_timer = self._completion_timers.pop(operation_id, None)
-        if previous_timer is not None:
-            previous_timer.cancel()
-
-        self._completion_timers[operation_id] = timer
-        timer.start()
-
-    def _complete_if_current(self, operation_id: UUID) -> None:
-        current = self.operation_dispatcher.current_scheduled_operation
-        if current is None or current.id != operation_id:
-            return
-
-        self.operation_dispatcher.complete_current()
+    def shutdown(self) -> None:
+        self._simulated_runner.cancel()
+        self._visualizer.stop()
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
 
-    service = MyDispatcherService()
-    service.seed_operations()
-    service.start_dispatcher_runtime()
+    host = "0.0.0.0"
+    flask_port = 8000
+    mcp_port = 8001
 
-    flask_app = service.create_flask_app()
+    service = DemoDispatcherDualInterfaceService(host=host, logger=logger)
+    service.add_demo_operations()
+
+    app = service.create_app()
+
+    # run flask app in its own thread.
     flask_thread = threading.Thread(
-        target=flask_app.run,
+        target=app.run,
         kwargs={
-            "host": "127.0.0.1",
-            "port": 5000,
+            "host": host,
+            "port": flask_port,
             "debug": False,
             "use_reloader": False,
         },
@@ -153,16 +257,20 @@ def main() -> None:
     )
     flask_thread.start()
 
-    print("Flask API available at http://127.0.0.1:5000")
-    print("Flask OpenAPI docs available at http://127.0.0.1:5000/apidocs/")
-    print("MCP SSE endpoint available at http://127.0.0.1:8000/sse")
-    print("MCP message endpoint available at http://127.0.0.1:8000/messages/")
+    # print("Flask API available at http://127.0.0.1:5000")
+    # print("Flask OpenAPI docs available at http://127.0.0.1:5000/")
+    # print("MCP SSE endpoint available at http://127.0.0.1:8000/sse")
+    # print("MCP message endpoint available at http://127.0.0.1:8000/messages/")
+    # print("Event visualizer available at http://127.0.0.1:8765")
+    # print("Runtime owner: OperationDispatcherOpenAPI")
+    # print("MCP uses built-in lifecycle tools delegated to shared OpenAPI runtime owner")
 
-    mcp_server = service.create_mcp_server(host="0.0.0.0", port=8000)
+    mcp_server = service.create_mcp_server(host=host, port=mcp_port)
     try:
         mcp_server.run(transport="sse")
     finally:
-        service.stop()
+        service.shutdown()
+        flask_thread.join(timeout=5.0)
 
 
 if __name__ == "__main__":

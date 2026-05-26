@@ -18,7 +18,7 @@ class DemoDispatcherMCPService:
     Example service demonstrating a shared `OperationDispatcher` exposed via MCP only.
     """
 
-    def __init__(self, logger: logging.Logger | None = None) -> None:
+    def __init__(self, host: str, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
         self._simulated_runner = SimulatedOperationRunner(
             on_complete=self._on_completed,
@@ -30,6 +30,16 @@ class DemoDispatcherMCPService:
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
             logger=self._logger,
+        )
+        self.mcp_server = OperationDispatcherMCPServer(
+            self.operation_dispatcher,
+            name="Shared Operation Dispatcher MCP",
+            instructions=(
+                "Expose the shared operation dispatcher state. Additional tools can "
+                "be registered on this server before startup."
+            ),
+            host=host,
+            json_response=True,
         )
 
     def add_demo_operations(self) -> None:
@@ -58,24 +68,6 @@ class DemoDispatcherMCPService:
                 resource_id="robot-1",
                 priority=0,
             )
-        )
-
-    def create_mcp_server(
-        self,
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8000,
-    ) -> OperationDispatcherMCPServer:
-        return OperationDispatcherMCPServer(
-            self.operation_dispatcher,
-            name="Shared Operation Dispatcher MCP",
-            instructions=(
-                "Expose the shared operation dispatcher state. Additional tools can "
-                "be registered on this server before startup."
-            ),
-            host=host,
-            port=port,
-            json_response=True,
         )
 
     def _on_request(self, event: DispatchEvent) -> bool | None:
@@ -136,6 +128,9 @@ class DemoDispatcherMCPService:
 
         self.operation_dispatcher.complete_current()
 
+    def run(self) -> None:
+        self.mcp_server.run(transport="sse")
+
     def stop(self) -> None:
         self._simulated_runner.cancel()
 
@@ -143,12 +138,11 @@ class DemoDispatcherMCPService:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
-    service = DemoDispatcherMCPService()
+    service = DemoDispatcherMCPService(host="0.0.0.0")
     service.add_demo_operations()
 
-    mcp_server = service.create_mcp_server(host="0.0.0.0", port=8000)
     try:
-        mcp_server.run(transport="sse")
+        service.run()
     finally:
         service.stop()
 

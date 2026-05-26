@@ -43,7 +43,6 @@ def test_dispatcher_starts_and_completes_current_operation() -> None:
 
     assert started is scheduled_operation
     assert dispatcher.current_scheduled_operation is scheduled_operation
-    assert dispatcher.current_operation is scheduled_operation
 
     execution = dispatcher.get_execution(scheduled_operation.id)
     assert execution is not None
@@ -207,10 +206,10 @@ def test_dispatcher_pause_blocks_start_until_resumed() -> None:
     scheduled_operation = _scheduled_operation()
     dispatcher.add(scheduled_operation)
 
-    dispatcher.pause()
+    dispatcher.pause_dispatcher_runtime()
     assert dispatcher._start_next() is None
 
-    dispatcher.resume()
+    dispatcher.resume_dispatcher_runtime()
     assert dispatcher._start_next() is scheduled_operation
 
 
@@ -370,14 +369,13 @@ def test_dispatcher_pause_current_emits_pause_requested_before_paused() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    paused = dispatcher.pause_current()
+    paused = dispatcher.pause_current_operation()
     assert paused is True
 
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_STARTED,
         DispatcherEventType.OPERATION_PAUSE_REQUESTED,
-        DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
         DispatcherEventType.OPERATION_PAUSED,
     ]
 
@@ -400,15 +398,19 @@ def test_dispatcher_resume_emits_resume_requested_when_current_exists() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    dispatcher.pause()
-    dispatcher.resume()
+    dispatcher.pause_dispatcher_runtime()
+    dispatcher.resume_dispatcher_runtime()
+    resume_accepted = dispatcher.resume_current_operation()
+
+    assert resume_accepted is True
 
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_STARTED,
         DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
-        DispatcherEventType.OPERATION_RESUME_REQUESTED,
         DispatcherEventType.OPERATION_DISPATCHER_RESUMED,
+        DispatcherEventType.OPERATION_RESUME_REQUESTED,
+        DispatcherEventType.OPERATION_RESUMED,
     ]
 
 
@@ -703,7 +705,7 @@ def test_dispatcher_does_not_pause_when_pause_request_denied() -> None:
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
 
-    paused = dispatcher.pause_current()
+    paused = dispatcher.pause_current_operation()
 
     assert paused is False
     assert dispatcher.current_scheduled_operation is scheduled_operation
@@ -729,11 +731,14 @@ def test_dispatcher_does_not_resume_when_resume_request_denied() -> None:
     scheduled_operation = _scheduled_operation()
     dispatcher.add(scheduled_operation)
     dispatcher._start_next()
-    dispatcher.pause()
+    dispatcher.pause_dispatcher_runtime()
 
-    dispatcher.resume()
+    dispatcher.resume_dispatcher_runtime()
+    resume_accepted = dispatcher.resume_current_operation()
 
-    assert dispatcher.is_paused is True
+    assert resume_accepted is False
+    assert dispatcher.is_paused is False
     assert DispatcherEventType.OPERATION_RESUME_REQUESTED in seen_events
     assert DispatcherEventType.OPERATION_RESUME_DENIED in seen_events
-    assert DispatcherEventType.OPERATION_DISPATCHER_RESUMED not in seen_events
+    assert DispatcherEventType.OPERATION_DISPATCHER_RESUMED in seen_events
+    assert DispatcherEventType.OPERATION_RESUMED not in seen_events
