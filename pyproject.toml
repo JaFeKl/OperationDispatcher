@@ -7,7 +7,11 @@ name = "operation-dispatcher"
 version = "0.1.0"
 description = "Lightweight operation dispatcher package for managing and executing operations"
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.12,<3.13"
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+]
 dependencies = [
   "pydantic>=2.8,<3.0",
 ]
