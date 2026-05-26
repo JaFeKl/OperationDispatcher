@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from operation_dispatcher import (
     EventType,
@@ -7,6 +8,7 @@ from operation_dispatcher import (
     OperationExecution,
     ExecutionState,
     OperationDispatcher,
+    OperationHistory,
     OperationHistoryEntry,
     OperationDispatcherState,
     ScheduledOperation,
@@ -346,8 +348,8 @@ def test_dispatcher_records_runtime_lifecycle_events() -> None:
     asyncio.run(run_dispatcher())
     event_types = [event.event_type for event in dispatcher.get_event_history()]
 
-    assert DispatcherEventType.OPERATION_MANAGER_STARTED in event_types
-    assert DispatcherEventType.OPERATION_MANAGER_STOPPED in event_types
+    assert DispatcherEventType.OPERATION_DISPATCHER_STARTED in event_types
+    assert DispatcherEventType.OPERATION_DISPATCHER_STOPPED in event_types
 
 
 def test_dispatcher_pause_current_emits_pause_requested_before_paused() -> None:
@@ -375,7 +377,7 @@ def test_dispatcher_pause_current_emits_pause_requested_before_paused() -> None:
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_STARTED,
         DispatcherEventType.OPERATION_PAUSE_REQUESTED,
-        DispatcherEventType.OPERATION_MANAGER_PAUSED,
+        DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
         DispatcherEventType.OPERATION_PAUSED,
     ]
 
@@ -404,9 +406,9 @@ def test_dispatcher_resume_emits_resume_requested_when_current_exists() -> None:
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_STARTED,
-        DispatcherEventType.OPERATION_MANAGER_PAUSED,
+        DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
         DispatcherEventType.OPERATION_RESUME_REQUESTED,
-        DispatcherEventType.OPERATION_MANAGER_RESUMED,
+        DispatcherEventType.OPERATION_DISPATCHER_RESUMED,
     ]
 
 
@@ -511,7 +513,7 @@ def test_dispatcher_pauses_when_denied_start_reaches_max_retries() -> None:
         DispatcherEventType.OPERATION_START_DENIED,
         DispatcherEventType.OPERATION_START_REQUESTED,
         DispatcherEventType.OPERATION_START_DENIED,
-        DispatcherEventType.OPERATION_MANAGER_PAUSED,
+        DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
     ]
 
 
@@ -555,13 +557,16 @@ def test_dispatcher_history_entries_include_execution_and_events() -> None:
     dispatcher._start_next()
     dispatcher.complete_current()
 
-    entries = dispatcher.get_history_entries(limit=1)
+    history = dispatcher.get_history(limit=1)
 
-    assert len(entries) == 1
-    history_entry = entries[0]
+    assert isinstance(history, OperationHistory)
+    assert history.number_of_entries == 1
+    assert len(history.entries) == 1
+    history_entry = history.entries[0]
     assert isinstance(history_entry, OperationHistoryEntry)
     assert history_entry.scheduled_operation.id == scheduled_operation.id
-    assert history_entry.execution.state is ExecutionState.COMPLETED
+    assert len(history_entry.execution) == 1
+    assert history_entry.execution[0].state is ExecutionState.COMPLETED
     assert any(
         event.event_type is DispatcherEventType.OPERATION_STARTED
         for event in history_entry.events
@@ -570,6 +575,77 @@ def test_dispatcher_history_entries_include_execution_and_events() -> None:
         event.event_type is DispatcherEventType.OPERATION_COMPLETED
         for event in history_entry.events
     )
+
+
+def test_dispatcher_history_callback_can_merge_external_history() -> None:
+    callback_calls: list[tuple[int | None, OperationHistory]] = []
+
+    def history_callback(
+        limit: int | None,
+        in_memory_history: OperationHistory,
+    ) -> OperationHistory:
+        callback_calls.append((limit, in_memory_history))
+
+        external_entry = OperationHistoryEntry(
+            scheduled_operation=ScheduledOperation(
+                payload={"task": "external"},
+                resource_id="resource-a",
+            ),
+            execution=[
+                OperationExecution(
+                    operation_id=UUID(int=1),
+                    state=ExecutionState.COMPLETED,
+                    outcome=ExecutionOutcome.SUCCESS,
+                )
+            ],
+            events=[],
+        )
+
+        merged_entries = [external_entry, *in_memory_history.entries]
+        return OperationHistory(
+            number_of_entries=len(merged_entries),
+            entries=merged_entries,
+        )
+
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        on_history_callback=history_callback,
+    )
+    scheduled_operation = _scheduled_operation()
+    dispatcher.add(scheduled_operation)
+    dispatcher._start_next()
+    dispatcher.complete_current()
+
+    history = dispatcher.get_history(limit=1)
+
+    assert len(callback_calls) == 1
+    callback_limit, callback_in_memory_history = callback_calls[0]
+    assert callback_limit == 1
+    assert callback_in_memory_history.number_of_entries == 1
+    assert history.number_of_entries == 2
+    assert history.entries[0].scheduled_operation.payload["task"] == "external"
+
+
+def test_dispatcher_history_callback_none_falls_back_to_in_memory_history() -> None:
+    def history_callback(
+        limit: int | None,
+        in_memory_history: OperationHistory,
+    ) -> None:
+        return None
+
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        on_history_callback=history_callback,
+    )
+    scheduled_operation = _scheduled_operation()
+    dispatcher.add(scheduled_operation)
+    dispatcher._start_next()
+    dispatcher.complete_current()
+
+    history = dispatcher.get_history(limit=1)
+
+    assert history.number_of_entries == 1
+    assert len(history.entries) == 1
 
 
 def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
@@ -660,4 +736,4 @@ def test_dispatcher_does_not_resume_when_resume_request_denied() -> None:
     assert dispatcher.is_paused is True
     assert DispatcherEventType.OPERATION_RESUME_REQUESTED in seen_events
     assert DispatcherEventType.OPERATION_RESUME_DENIED in seen_events
-    assert DispatcherEventType.OPERATION_MANAGER_RESUMED not in seen_events
+    assert DispatcherEventType.OPERATION_DISPATCHER_RESUMED not in seen_events

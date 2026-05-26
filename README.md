@@ -66,7 +66,7 @@ When `run()` is started, the dispatcher:
 
 1. switches its runtime state to running,
 2. stores the current event loop and a wakeup event,
-3. emits `OPERATION_MANAGER_STARTED`,
+3. emits `OPERATION_DISPATCHER_STARTED`,
 4. repeatedly executes `run_once()` until `request_stop()` is called.
 
 Inside each `run_once()` iteration, the dispatcher performs these checks in order:
@@ -92,10 +92,10 @@ Callbacks:
 
 ### Manager lifecycle events
 
-- `OPERATION_MANAGER_STARTED`: emitted when `run()` enters its main loop.
-- `OPERATION_MANAGER_STOPPED`: emitted when the runtime loop exits and dispatcher state is cleaned up.
-- `OPERATION_MANAGER_PAUSED`: emitted when the dispatcher is paused manually or after too many denied retries.
-- `OPERATION_MANAGER_RESUMED`: emitted after a successful resume and, if applicable, resume request approval.
+- `OPERATION_DISPATCHER_STARTED`: emitted when `run()` enters its main loop.
+- `OPERATION_DISPATCHER_STOPPED`: emitted when the runtime loop exits and dispatcher state is cleaned up.
+- `OPERATION_DISPATCHER_PAUSED`: emitted when the dispatcher is paused manually or after too many denied retries.
+- `OPERATION_DISPATCHER_RESUMED`: emitted after a successful resume and, if applicable, resume request approval.
 
 ### Request events
 

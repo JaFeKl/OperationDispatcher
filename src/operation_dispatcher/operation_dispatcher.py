@@ -15,6 +15,7 @@ from .models import (
     EventType,
     ExecutionOutcome,
     ExecutionState,
+    OperationHistory,
     OperationHistoryEntry,
     OperationExecution,
     OperationDispatcherState,
@@ -38,21 +39,28 @@ class OperationDispatcher:
     `planned_duration` automatically inherit that value (milliseconds). Call
     `add(..., apply_default_planned_duration=False)` to keep `planned_duration=None`
     for a specific operation.
+
+    `on_history_callback` can be provided to fetch/augment history from an external
+    source (for example a database). The callback receives `(limit, in_memory_history)`
+    and may return `OperationHistory` or None.
     """
 
     def __init__(
         self,
         resource_id: str,
-        on_request_callback: (
-            Callable[[DispatchEvent], bool | dict[str, Any] | None] | None
-        ) = None,
-        on_notification_callback: Callable[[DispatchEvent], object] | None = None,
         poll_interval_seconds: float = 0.1,
         start_request_max_retries: int = 5,
         start_request_retry_cooldown_seconds: float = 1.0,
         request_event_timeout_seconds: float = 5.0,
         default_planned_duration: int | None = None,
         dispatch_queue_sort_rules: list[SortRule] | None = None,
+        on_request_callback: (
+            Callable[[DispatchEvent], bool | dict[str, Any] | None] | None
+        ) = None,
+        on_notification_callback: Callable[[DispatchEvent], object] | None = None,
+        on_history_callback: (
+            Callable[[int | None, OperationHistory], OperationHistory | None] | None
+        ) = None,
         logger: logging.Logger | None = None,
     ) -> None:
         if poll_interval_seconds <= 0:
@@ -90,6 +98,7 @@ class OperationDispatcher:
         self._event_history: list[DispatchEvent] = []
         self._event_history_limit = 1000
         self._default_planned_duration = default_planned_duration
+        self._on_history_callback = on_history_callback
 
         self._notification_handler = NotificationHandler(
             on_notification_callback=on_notification_callback,
@@ -209,7 +218,7 @@ class OperationDispatcher:
     def _pause_internal(self) -> None:
         self._is_paused = True
         self._set_current_execution_state(ExecutionState.PAUSED)
-        self._emit_event(EventType.OPERATION_MANAGER_PAUSED)
+        self._emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
 
     def resume(self) -> None:
         self._execute_state_mutation(self._resume_internal)
@@ -226,7 +235,7 @@ class OperationDispatcher:
         self._request_handler.clear_all_request_retry_state()
         self._is_paused = False
         self._set_current_execution_state(ExecutionState.RUNNING)
-        self._emit_event(EventType.OPERATION_MANAGER_RESUMED)
+        self._emit_event(EventType.OPERATION_DISPATCHER_RESUMED)
 
     def _start_next(self) -> ScheduledOperation | None:
         if self._is_paused:
@@ -279,7 +288,7 @@ class OperationDispatcher:
         self._stop_requested = False
         self._runtime_loop = asyncio.get_running_loop()
         self._wakeup_event = asyncio.Event()
-        self._emit_event(EventType.OPERATION_MANAGER_STARTED)
+        self._emit_event(EventType.OPERATION_DISPATCHER_STARTED)
         try:
             while not self._stop_requested:
                 try:
@@ -297,7 +306,7 @@ class OperationDispatcher:
                 await self._wait_for_next_signal()
         finally:
             self._running_since = None
-            self._emit_event(EventType.OPERATION_MANAGER_STOPPED)
+            self._emit_event(EventType.OPERATION_DISPATCHER_STOPPED)
             self._runtime_loop = None
             self._wakeup_event = None
 
@@ -363,7 +372,7 @@ class OperationDispatcher:
         execution.state = ExecutionState.PAUSED
 
         self._emit_event(
-            EventType.OPERATION_MANAGER_PAUSED,
+            EventType.OPERATION_DISPATCHER_PAUSED,
             scheduled_operation=scheduled_operation,
         )
         self._emit_event(
@@ -418,10 +427,29 @@ class OperationDispatcher:
             return list(self._event_history)
         return list(self._event_history[-limit:])
 
-    def get_history_entries(
+    def get_history(
         self,
         limit: int | None = None,
-    ) -> list[OperationHistoryEntry]:
+    ) -> OperationHistory:
+        in_memory_history = self._get_in_memory_history(limit)
+        if self._on_history_callback is None:
+            return in_memory_history
+
+        callback_result = self._on_history_callback(limit, in_memory_history)
+        if callback_result is None:
+            return in_memory_history
+        if isinstance(callback_result, OperationHistory):
+            return callback_result
+
+        return OperationHistory(
+            number_of_entries=len(callback_result),
+            entries=callback_result,
+        )
+
+    def _get_in_memory_history(
+        self,
+        limit: int | None,
+    ) -> OperationHistory:
         history_operations = self._dispatch_queue.history(limit=limit)
         history_entries: list[OperationHistoryEntry] = []
 
@@ -435,12 +463,15 @@ class OperationDispatcher:
             history_entries.append(
                 OperationHistoryEntry(
                     scheduled_operation=scheduled_operation,
-                    execution=execution,
+                    execution=[execution],
                     events=operation_events,
                 )
             )
 
-        return history_entries
+        return OperationHistory(
+            number_of_entries=len(history_entries),
+            entries=history_entries,
+        )
 
     def _require_current_scheduled_operation(self) -> ScheduledOperation:
         scheduled_operation = self.current_scheduled_operation
@@ -540,12 +571,12 @@ class OperationDispatcher:
             return
 
         if event.event_type in {
-            EventType.OPERATION_MANAGER_PAUSED,
-            EventType.OPERATION_MANAGER_STOPPED,
+            EventType.OPERATION_DISPATCHER_PAUSED,
+            EventType.OPERATION_DISPATCHER_STOPPED,
         }:
             self._logger.warning("EVENT %s", event.event_type)
         elif event.event_type in {
-            EventType.OPERATION_MANAGER_RESUMED,
+            EventType.OPERATION_DISPATCHER_RESUMED,
         }:
             self._logger.info("EVENT %s", event.event_type)
         else:

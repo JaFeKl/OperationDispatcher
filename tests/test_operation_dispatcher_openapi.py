@@ -293,14 +293,14 @@ def test_dispatcher_openapi_history_response_uses_limit_and_returns_newest_first
     history_payload, status_code = dispatcher_api.get_dispatch_history_response(limit=1)
 
     assert status_code == 200
-    assert history_payload["limit"] == 1
-    assert history_payload["count"] == 1
+    assert history_payload["number_of_entries"] == 1
     history_entry = history_payload["entries"][0]
     assert history_entry["scheduled_operation"]["id"] in {
         first_id,
         second_id,
     }
     assert "execution" in history_entry
+    assert isinstance(history_entry["execution"], list)
     assert "events" in history_entry
 
 

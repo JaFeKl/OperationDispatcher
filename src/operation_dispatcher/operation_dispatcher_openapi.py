@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from .models import (
     EventType,
     ExecutionState,
+    OperationHistory,
     OperationHistoryEntry,
     ScheduledOperation,
 )
@@ -83,15 +84,8 @@ class OperationDispatcherOpenAPI:
                 status_code=400,
             )
 
-        history_entries = self._operation_dispatcher.get_history_entries(
-            limit=resolved_limit
-        )
-        payload = {
-            "limit": resolved_limit,
-            "count": len(history_entries),
-            "entries": [entry.model_dump(mode="json") for entry in history_entries],
-        }
-        return payload, 200
+        history = self._operation_dispatcher.get_history(limit=resolved_limit)
+        return history.model_dump(mode="json"), 200
 
     def get_current_operation_response(self) -> tuple[dict[str, Any], int]:
         current_scheduled_operation = (
@@ -732,9 +726,7 @@ class OperationDispatcherOpenAPI:
             "responses": {
                 200: {
                     "description": "Most recent completed operations.",
-                    "schema": {
-                        "$ref": "#/definitions/OperationDispatcherHistoryResponse"
-                    },
+                    "schema": {"$ref": "#/definitions/OperationHistory"},
                 },
                 400: {
                     "description": "Invalid limit value.",
@@ -1076,13 +1068,27 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "scheduled_operation": {"$ref": "#/definitions/ScheduledOperation"},
-                    "execution": {"$ref": "#/definitions/OperationExecution"},
+                    "execution": {
+                        "type": "array",
+                        "items": {"$ref": "#/definitions/OperationExecution"},
+                    },
                     "events": {
                         "type": "array",
                         "items": {"$ref": "#/definitions/DispatchEvent"},
                     },
                 },
                 "required": ["scheduled_operation", "execution", "events"],
+            },
+            "OperationHistory": {
+                "type": "object",
+                "properties": {
+                    "number_of_entries": {"type": "integer"},
+                    "entries": {
+                        "type": "array",
+                        "items": {"$ref": "#/definitions/OperationHistoryEntry"},
+                    },
+                },
+                "required": ["number_of_entries", "entries"],
             },
             "OperationDispatcherState": {
                 "type": "object",
@@ -1122,18 +1128,6 @@ class OperationDispatcherOpenAPI:
                     "state": {"$ref": "#/definitions/OperationDispatcherState"},
                 },
                 "required": ["message", "state"],
-            },
-            "OperationDispatcherHistoryResponse": {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer"},
-                    "count": {"type": "integer"},
-                    "entries": {
-                        "type": "array",
-                        "items": {"$ref": "#/definitions/OperationHistoryEntry"},
-                    },
-                },
-                "required": ["limit", "count", "entries"],
             },
             "AddOperationRequest": {
                 "type": "array",

@@ -41,10 +41,10 @@ class TerminationReason(str, Enum):
 
 
 class EventType(str, Enum):
-    OPERATION_MANAGER_STARTED = "operation_manager_started"
-    OPERATION_MANAGER_STOPPED = "operation_manager_stopped"
-    OPERATION_MANAGER_PAUSED = "operation_manager_paused"
-    OPERATION_MANAGER_RESUMED = "operation_manager_resumed"
+    OPERATION_DISPATCHER_STARTED = "operation_dispatcher_started"
+    OPERATION_DISPATCHER_STOPPED = "operation_dispatcher_stopped"
+    OPERATION_DISPATCHER_PAUSED = "operation_dispatcher_paused"
+    OPERATION_DISPATCHER_RESUMED = "operation_dispatcher_resumed"
 
     OPERATION_START_REQUESTED = "operation_start_requested"
     OPERATION_START_DENIED = "operation_start_denied"
@@ -170,12 +170,29 @@ class OperationDependency(BaseModel):
 
 
 class OperationHistoryEntry(BaseModel):
+    """
+    A record of an completed operation, including the operation details, its execution history, and any events that occurred during its lifecycle.
+    """
+
     scheduled_operation: ScheduledOperation
-    execution: OperationExecution
+    execution: list[OperationExecution]
     events: list[DispatchEvent] = Field(default_factory=list)
 
 
+class OperationHistory(BaseModel):
+    """
+    A record of the history of operations.
+    """
+
+    number_of_entries: int = 0
+    entries: list[OperationHistoryEntry] = Field(default_factory=list)
+
+
 class OperationDispatcherState(BaseModel):
+    """
+    A record of the current state of the operation dispatcher, including whether it is running or paused, the size of the queue, and details about the currently running operation if applicable.
+    """
+
     is_running: bool
     is_paused: bool
     queue_size: int
