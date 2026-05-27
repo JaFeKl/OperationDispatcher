@@ -12,7 +12,7 @@ from .models import (
     EventType,
     ExecutionState,
     OperationHistory,
-    ScheduledOperation,
+    Operation,
 )
 from .operation_dispatcher import OperationDispatcher
 from .runtime_controller import OperationDispatcherRuntimeController
@@ -61,7 +61,7 @@ class OperationDispatcherOpenAPI:
 
     def _build_operation_status_payload(
         self,
-        scheduled_operation: ScheduledOperation,
+        scheduled_operation: Operation,
     ) -> dict[str, Any]:
         execution = self._operation_dispatcher.get_execution(scheduled_operation.id)
         current_operation = self._operation_dispatcher.current_scheduled_operation
@@ -115,7 +115,7 @@ class OperationDispatcherOpenAPI:
                     details={"valid_states": sorted(valid_states)},
                 )
 
-        operation_by_id: dict[UUID, ScheduledOperation] = {}
+        operation_by_id: dict[UUID, Operation] = {}
         current_operation = self._operation_dispatcher.current_scheduled_operation
         if current_operation is not None:
             operation_by_id[current_operation.id] = current_operation
@@ -220,7 +220,7 @@ class OperationDispatcherOpenAPI:
                 status_code=400,
             )
 
-        scheduled_operations: list[ScheduledOperation] = []
+        scheduled_operations: list[Operation] = []
         for index, operation_request in enumerate(request_payload):
             if not isinstance(operation_request, dict):
                 return self._error_response(
@@ -256,7 +256,7 @@ class OperationDispatcherOpenAPI:
     def _build_scheduled_operation(
         self,
         request_payload: dict[str, Any],
-    ) -> tuple[ScheduledOperation | dict[str, Any], int]:
+    ) -> tuple[Operation | dict[str, Any], int]:
         if "resource_id" in request_payload:
             return self._error_response(
                 message="resource_id must not be provided; it is assigned by the dispatcher resource",
@@ -280,7 +280,7 @@ class OperationDispatcherOpenAPI:
             )
 
         try:
-            scheduled_operation = ScheduledOperation.model_validate(
+            scheduled_operation = Operation.model_validate(
                 {
                     "payload": payload,
                     "resource_id": self._resource_id,
@@ -1038,7 +1038,7 @@ class OperationDispatcherOpenAPI:
                 },
                 "required": ["error", "message", "code"],
             },
-            "ScheduledOperation": {
+            "Operation": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
@@ -1080,7 +1080,7 @@ class OperationDispatcherOpenAPI:
             "OperationStatus": {
                 "type": "object",
                 "properties": {
-                    "scheduled_operation": {"$ref": "#/definitions/ScheduledOperation"},
+                    "scheduled_operation": {"$ref": "#/definitions/Operation"},
                     "execution": {
                         "oneOf": [
                             {"$ref": "#/definitions/OperationExecution"},
@@ -1120,7 +1120,7 @@ class OperationDispatcherOpenAPI:
             "OperationHistoryEntry": {
                 "type": "object",
                 "properties": {
-                    "scheduled_operation": {"$ref": "#/definitions/ScheduledOperation"},
+                    "scheduled_operation": {"$ref": "#/definitions/Operation"},
                     "execution": {
                         "type": "array",
                         "items": {"$ref": "#/definitions/OperationExecution"},
@@ -1151,7 +1151,7 @@ class OperationDispatcherOpenAPI:
                     "queue_size": {"type": "integer"},
                     "current_operation": {
                         "oneOf": [
-                            {"$ref": "#/definitions/ScheduledOperation"},
+                            {"$ref": "#/definitions/Operation"},
                             {"type": "null"},
                         ]
                     },

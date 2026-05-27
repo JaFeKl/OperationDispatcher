@@ -16,7 +16,7 @@ from operation_dispatcher import (
     OperationDispatcher,
     OperationDispatcherMCPServer,
     OperationDispatcherOpenAPI,
-    ScheduledOperation,
+    Operation,
     SimulatedOperationRunner,
 )
 
@@ -229,7 +229,7 @@ class DemoDispatcherService:
 
     def load_demo_schedule(self) -> None:
         operations = [
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "pickup_part",
                     "task": "pickup",
@@ -238,7 +238,7 @@ class DemoDispatcherService:
                 resource_id="robot-1",
                 priority=0,
             ),
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "deliver_part",
                     "task": "dropoff",

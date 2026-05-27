@@ -11,7 +11,7 @@ from operation_dispatcher import (
     OperationHistory,
     OperationHistoryEntry,
     OperationDispatcherState,
-    ScheduledOperation,
+    Operation,
     TerminationReason,
 )
 
@@ -24,8 +24,8 @@ def _scheduled_operation(
     release_date: datetime | None = None,
     priority: int = 0,
     planned_duration: int | None = None,
-) -> ScheduledOperation:
-    return ScheduledOperation(
+) -> Operation:
+    return Operation(
         payload={},
         resource_id=resource_id,
         release_date=release_date,
@@ -161,7 +161,7 @@ def test_dispatcher_add_normalizes_created_at_to_utc() -> None:
         resource_id="resource-a",
         on_notification_callback=notification_callback,
     )
-    scheduled_operation = ScheduledOperation(
+    scheduled_operation = Operation(
         payload={},
         resource_id="resource-a",
         created_at=datetime(2026, 5, 25, 10, 0, tzinfo=timezone(timedelta(hours=2))),
@@ -460,7 +460,7 @@ def test_dispatcher_retries_denied_start_after_cooldown() -> None:
     scheduled_operation = _scheduled_operation()
     dispatcher.add(scheduled_operation)
 
-    async def run_attempts() -> ScheduledOperation | None:
+    async def run_attempts() -> Operation | None:
         first = await dispatcher.run_once()
         second = await dispatcher.run_once()
         await asyncio.sleep(0.03)
@@ -589,7 +589,7 @@ def test_dispatcher_history_callback_can_merge_external_history() -> None:
         callback_calls.append((limit, in_memory_history))
 
         external_entry = OperationHistoryEntry(
-            scheduled_operation=ScheduledOperation(
+            scheduled_operation=Operation(
                 payload={"task": "external"},
                 resource_id="resource-a",
             ),

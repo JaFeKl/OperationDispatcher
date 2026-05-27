@@ -8,7 +8,7 @@ from operation_dispatcher import (
     EventType,
     OperationDispatcher,
     OperationDispatcherMCPServer,
-    ScheduledOperation,
+    Operation,
     SimulatedOperationRunner,
 )
 
@@ -105,7 +105,7 @@ class DemoDispatcherMCPService:
 
     def run_demo(self) -> None:
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "my_operation_1",
                     "task": "pickup",
@@ -116,7 +116,7 @@ class DemoDispatcherMCPService:
             )
         )
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "my_operation_2",
                     "task": "dropoff",

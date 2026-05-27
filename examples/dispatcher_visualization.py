@@ -10,7 +10,7 @@ from operation_dispatcher import (
     DispatchEvent,
     EventType,
     OperationDispatcher,
-    ScheduledOperation,
+    Operation,
     SimulatedOperationRunner,
 )
 
@@ -75,14 +75,14 @@ class VisualizedDispatcherDemo:
         self._logger.info(f"Starting simulated demo operations...")
 
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={"name": "pickup", "run_seconds": 5.0},
                 resource_id="robot-1",
                 priority=10,
             )
         )
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={"name": "dropoff", "run_seconds": 5.0},
                 resource_id="robot-1",
                 priority=5,

@@ -9,7 +9,7 @@ from .models import (
     OperationHistoryEntry,
     OperationExecution,
     OperationDispatcherState,
-    ScheduledOperation,
+    Operation,
     TerminationReason,
 )
 from .dispatch_queue import DispatchQueue, SortDirection, SortField, SortRule
@@ -36,7 +36,7 @@ _OPTIONAL_MCP_EXPORTS = {
 
 __all__ = [
     "DependencyType",
-    "ScheduledOperation",
+    "Operation",
     "OperationDependency",
     "OperationHistory",
     "OperationHistoryEntry",

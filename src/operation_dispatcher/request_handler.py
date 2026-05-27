@@ -13,7 +13,7 @@ from uuid import UUID
 from .models import (
     DispatchEvent,
     EventType,
-    ScheduledOperation,
+    Operation,
 )
 from .retry_policy import RetryPolicy
 
@@ -37,7 +37,7 @@ class RequestHandler:
         emit_event: Callable[
             [
                 EventType,
-                ScheduledOperation | None,
+                Operation | None,
                 dict[str, Any] | None,
             ],
             object,
@@ -57,13 +57,13 @@ class RequestHandler:
         self._notify_wakeup = notify_wakeup
         self._pause = pause
 
-    async def request_operation_start(self, operation: ScheduledOperation) -> bool:
+    async def request_operation_start(self, operation: Operation) -> bool:
         return await self.request_operation_with_retry(
             operation,
             EventType.OPERATION_START_REQUESTED,
         )
 
-    def has_request_cooldown(self, operation: ScheduledOperation) -> bool:
+    def has_request_cooldown(self, operation: Operation) -> bool:
         now = datetime.now(timezone.utc)
         request_event_types = (EventType.OPERATION_START_REQUESTED,)
         for request_event_type in request_event_types:
@@ -86,7 +86,7 @@ class RequestHandler:
 
     def request_cooldown_wait_seconds(
         self,
-        operation: ScheduledOperation,
+        operation: Operation,
         now: datetime,
     ) -> float:
         cooldown_wait_seconds = 0.0
@@ -105,7 +105,7 @@ class RequestHandler:
 
     def request_operation_with_retry_sync(
         self,
-        operation: ScheduledOperation,
+        operation: Operation,
         event_type: EventType,
     ) -> bool:
         now = datetime.now(timezone.utc)
@@ -142,7 +142,7 @@ class RequestHandler:
 
     async def request_operation_with_retry(
         self,
-        operation: ScheduledOperation,
+        operation: Operation,
         event_type: EventType,
     ) -> bool:
         now = datetime.now(timezone.utc)
@@ -198,7 +198,7 @@ class RequestHandler:
 
     async def _request_operation_event(
         self,
-        operation: ScheduledOperation,
+        operation: Operation,
         event_type: EventType,
     ) -> RequestDecision:
         execution_id = self._get_execution_id(operation.id)
@@ -238,7 +238,7 @@ class RequestHandler:
 
     def _request_operation_event_sync(
         self,
-        operation: ScheduledOperation,
+        operation: Operation,
         event_type: EventType,
     ) -> RequestDecision:
         execution_id = self._get_execution_id(operation.id)

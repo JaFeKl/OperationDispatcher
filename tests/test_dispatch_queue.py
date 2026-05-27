@@ -8,7 +8,7 @@ from operation_dispatcher.dispatch_queue import (
     SortField,
     SortRule,
 )
-from operation_dispatcher.models import ScheduledOperation
+from operation_dispatcher.models import Operation
 
 
 def _scheduled_operation(
@@ -18,8 +18,8 @@ def _scheduled_operation(
     release_date: datetime | None = None,
     due_date: datetime | None = None,
     planned_duration: int | None = None,
-) -> ScheduledOperation:
-    return ScheduledOperation(
+) -> Operation:
+    return Operation(
         payload={},
         resource_id=resource_id,
         priority=priority,

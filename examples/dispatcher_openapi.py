@@ -13,7 +13,7 @@ from operation_dispatcher import (
     EventType,
     OperationDispatcher,
     OperationDispatcherOpenAPI,
-    ScheduledOperation,
+    Operation,
 )
 from operation_dispatcher import SimulatedOperationRunner
 
@@ -171,7 +171,7 @@ class DemoDispatcherService:
 
     async def run_demo(self) -> None:
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "my_operation_1",
                     "task": "pickup",
@@ -182,7 +182,7 @@ class DemoDispatcherService:
             )
         )
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "my_operation_2",
                     "task": "dropoff",

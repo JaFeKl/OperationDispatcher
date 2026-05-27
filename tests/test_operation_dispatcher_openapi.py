@@ -6,7 +6,7 @@ from operation_dispatcher import (
     ExecutionState,
     OperationDispatcher,
     OperationDispatcherOpenAPI,
-    ScheduledOperation,
+    Operation,
 )
 
 
@@ -14,8 +14,8 @@ def _scheduled_operation(
     *,
     resource_id: str = "resource-a",
     priority: int = 0,
-) -> ScheduledOperation:
-    return ScheduledOperation(
+) -> Operation:
+    return Operation(
         payload={"task": "sync", "retries": 0},
         resource_id=resource_id,
         priority=priority,
@@ -291,12 +291,12 @@ def test_openapi_definitions_include_operation_status_model() -> None:
     definitions = dispatcher_api.get_openapi_definitions()
 
     assert "OperationStatus" in definitions
-    assert "ScheduledOperation" in definitions
+    assert "Operation" in definitions
     assert "OperationExecution" in definitions
     assert "AddOperationItem" in definitions
     assert (
         definitions["OperationStatus"]["properties"]["scheduled_operation"]["$ref"]
-        == "#/definitions/ScheduledOperation"
+        == "#/definitions/Operation"
     )
 
 

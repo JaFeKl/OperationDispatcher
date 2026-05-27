@@ -8,7 +8,7 @@ from operation_dispatcher import (
     DispatchEvent,
     EventType,
     OperationDispatcher,
-    ScheduledOperation,
+    Operation,
     SimulatedOperationRunner,
 )
 
@@ -62,7 +62,7 @@ class CallbackDrivenDispatcher:
 
     async def run_demo(self) -> None:
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "my_operation_1",
                     "task": "pickup",
@@ -73,7 +73,7 @@ class CallbackDrivenDispatcher:
             )
         )
         self.operation_dispatcher.add(
-            ScheduledOperation(
+            Operation(
                 payload={
                     "name": "my_operation_2",
                     "task": "dropoff",

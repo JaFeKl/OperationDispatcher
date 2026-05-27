@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from .models import ScheduledOperation
+from .models import Operation
 
 
 class SortField(str, Enum):
@@ -45,14 +45,14 @@ class DispatchQueue:
     def __init__(
         self,
         resource_id: str,
-        operations: Iterable[ScheduledOperation] | None = None,
+        operations: Iterable[Operation] | None = None,
         sort_rules: Iterable[SortRule] | None = None,
     ) -> None:
         self._resource_id = resource_id
         self._sort_rules = self._resolve_sort_rules(sort_rules)
-        self._queue: list[ScheduledOperation] = []
-        self._pulled: ScheduledOperation | None = None
-        self._completed: list[ScheduledOperation] = []
+        self._queue: list[Operation] = []
+        self._pulled: Operation | None = None
+        self._completed: list[Operation] = []
 
         for operation in operations or []:
             self.add(operation)
@@ -65,29 +65,29 @@ class DispatchQueue:
         return self._resource_id
 
     @property
-    def pulled_operation(self) -> ScheduledOperation | None:
+    def pulled_operation(self) -> Operation | None:
         return self._pulled
 
     @property
-    def completed_operations(self) -> list[ScheduledOperation]:
+    def completed_operations(self) -> list[Operation]:
         return list(self._completed)
 
     @property
     def sort_rules(self) -> tuple[SortRule, ...]:
         return tuple(self._sort_rules)
 
-    def history(self, limit: int | None = None) -> list[ScheduledOperation]:
+    def history(self, limit: int | None = None) -> list[Operation]:
         operations = list(reversed(self._completed))
         if limit is None:
             return operations
         return operations[:limit]
 
-    def add(self, operation: ScheduledOperation) -> None:
+    def add(self, operation: Operation) -> None:
         self._validate_operation(operation)
         self._queue.append(operation)
         self._sort_operations()
 
-    def get(self, operation_id: UUID) -> ScheduledOperation | None:
+    def get(self, operation_id: UUID) -> Operation | None:
         """
         Get an operation by ID from the schedule, including pending, pulled and completed operations.
         """
@@ -102,7 +102,7 @@ class DispatchQueue:
                 return scheduled_operation
         return None
 
-    def next(self) -> ScheduledOperation | None:
+    def next(self) -> Operation | None:
         if self._pulled is not None:
             raise RuntimeError(
                 "cannot pull next operation while another operation is active"
@@ -114,12 +114,12 @@ class DispatchQueue:
         self._pulled = operation
         return operation
 
-    def peek(self) -> ScheduledOperation | None:
+    def peek(self) -> Operation | None:
         if not self._queue:
             return None
         return self._queue[0]
 
-    def complete(self, operation: ScheduledOperation) -> None:
+    def complete(self, operation: Operation) -> None:
         self._validate_operation(operation)
 
         if self._pulled is None or self._pulled is not operation:
@@ -129,7 +129,7 @@ class DispatchQueue:
         self._archive_completed_operation(operation)
         self._pulled = None
 
-    def list(self) -> list[ScheduledOperation]:
+    def list(self) -> list[Operation]:
         return list(self._queue)
 
     def clear(self) -> None:
@@ -138,13 +138,13 @@ class DispatchQueue:
     def clear_history(self) -> None:
         self._completed.clear()
 
-    def remove(self, operation_id: UUID) -> ScheduledOperation | None:
+    def remove(self, operation_id: UUID) -> Operation | None:
         for index, operation in enumerate(self._queue):
             if operation.id == operation_id:
                 return self._queue.pop(index)
         return None
 
-    def cancel(self, operation_id: UUID) -> ScheduledOperation | None:
+    def cancel(self, operation_id: UUID) -> Operation | None:
         if self._pulled is not None and self._pulled.id == operation_id:
             operation = self._pulled
             self._archive_completed_operation(operation)
@@ -157,7 +157,7 @@ class DispatchQueue:
         self._archive_completed_operation(operation)
         return operation
 
-    def _archive_completed_operation(self, operation: ScheduledOperation) -> None:
+    def _archive_completed_operation(self, operation: Operation) -> None:
         if operation not in self._completed:
             self._completed.append(operation)
 
@@ -165,7 +165,7 @@ class DispatchQueue:
         self._queue.sort(key=self._operation_sort_key)
 
     def _operation_sort_key(
-        self, operation: ScheduledOperation
+        self, operation: Operation
     ) -> tuple[tuple[int, float], ...]:
         return tuple(
             self._rule_key_component(operation, rule) for rule in self._sort_rules
@@ -173,7 +173,7 @@ class DispatchQueue:
 
     def _rule_key_component(
         self,
-        operation: ScheduledOperation,
+        operation: Operation,
         rule: SortRule,
     ) -> tuple[int, float]:
         raw_value = self._field_value(operation, rule.field)
@@ -197,7 +197,7 @@ class DispatchQueue:
 
     @staticmethod
     def _field_value(
-        operation: ScheduledOperation,
+        operation: Operation,
         field: SortField,
     ) -> int | datetime | None:
         if field is SortField.PRIORITY:
@@ -242,7 +242,7 @@ class DispatchQueue:
 
         return resolved_rules
 
-    def _validate_operation(self, operation: ScheduledOperation) -> None:
+    def _validate_operation(self, operation: Operation) -> None:
         if self._resource_id is not None and operation.resource_id != self._resource_id:
             raise ValueError(
                 "operation resource_id does not match schedule resource_id",

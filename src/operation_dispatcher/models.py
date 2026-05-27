@@ -88,7 +88,7 @@ class DispatchEvent(BaseModel):
         return self
 
 
-class ScheduledOperation(BaseModel):
+class Operation(BaseModel):
     """
     An operation scheduled for execution on an agent/resource.
     The payload field is user-defined and can contain any information needed
@@ -105,7 +105,7 @@ class ScheduledOperation(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")
-    def validate_scheduled_operation(self) -> "ScheduledOperation":
+    def validate_scheduled_operation(self) -> "Operation":
         self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
         self.release_date = _normalize_to_utc(self.release_date)  # type: ignore[assignment]
         self.due_date = _normalize_to_utc(self.due_date)  # type: ignore[assignment]
@@ -175,7 +175,7 @@ class OperationHistoryEntry(BaseModel):
     A record of an completed operation, including the operation details, its execution history, and any events that occurred during its lifecycle.
     """
 
-    scheduled_operation: ScheduledOperation
+    scheduled_operation: Operation
     execution: list[OperationExecution]
     events: list[DispatchEvent] = Field(default_factory=list)
 
@@ -197,6 +197,6 @@ class OperationDispatcherState(BaseModel):
     is_running: bool
     is_paused: bool
     queue_size: int
-    current_operation: ScheduledOperation | None = None
+    current_operation: Operation | None = None
     running_since: datetime | None = None
     uptime_seconds: float | None = None

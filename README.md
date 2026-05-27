@@ -28,7 +28,7 @@ Typical workflow:
 ```mermaid
 flowchart TD
 
-    SO[ScheduledOperation]
+    SO[Operation]
 
     Q[DispatchQueue]
 
@@ -41,7 +41,8 @@ flowchart TD
     SO --> Q
     Q --> D
 
-    D -->|request/approval callbacks| EXT
+    D -->|handshake requests| EXT
+    EXT -->|handshake response| D
     D -->|lifecycle notifications| EXT
 
     API --> D
@@ -73,13 +74,13 @@ pip install -e .[api]
 import asyncio
 from operation_dispatcher import (
     OperationDispatcher,
-    ScheduledOperation,
+    Operation,
     DispatchEvent,
     EventType,
 )
 
 def on_request(event: DispatchEvent) -> bool | None:
-	# Decide whether an operation is allowed to proceed.
+	# Decide on a *_REQUEST event.
 	# Return True to approve, False to deny, None to ignore other events.
 
     if event.event_type is EventType.OPERATION_START_REQUESTED:
@@ -101,7 +102,7 @@ async def main():
     )
 
     dispatcher.add(
-        ScheduledOperation(
+        Operation(
             payload={"task": "pickup"},
             resource_id="robot-1",
             priority=10,
@@ -119,7 +120,7 @@ asyncio.run(main())
 
 ## Core Data Models
 
-- `ScheduledOperation`: Represents a queued operation with payload, priority, and scheduling metadata.
+- `Operation`: Represents a queued operation with payload, priority, and scheduling metadata.
 - `OperationExecution`: Runtime state of a scheduled operation (running, paused, completed, failed).
 - `DispatchEvent`: Event emitted during lifecycle transitions and request/notification flows.
 

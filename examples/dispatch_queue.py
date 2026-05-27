@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from operation_dispatcher import DispatchQueue, ScheduledOperation
+from operation_dispatcher import DispatchQueue, Operation
 
 
 def main() -> None:
     dispatch_queue = DispatchQueue(resource_id="robot-1")
 
     dispatch_queue.add(
-        ScheduledOperation(
+        Operation(
             payload={
                 "name": "my_operation_1",
                 "my_custom_field": "hello world",
@@ -17,7 +17,7 @@ def main() -> None:
         )
     )
     dispatch_queue.add(
-        ScheduledOperation(
+        Operation(
             payload={
                 "name": "my_operation_2",
                 "my_custom_field": "goodbye world",
