@@ -44,6 +44,9 @@ class VisualizedDispatcherDemo:
     def _on_request(self, event: DispatchEvent) -> bool | None:
         self.visualizer.on_request(event)
 
+        if event.operation_id is None:
+            return None
+
         scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
             event.operation_id
         )

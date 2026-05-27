@@ -34,6 +34,7 @@ class OperationDispatcherMCPServer:
         host: str = "127.0.0.1",
         port: int = 8000,
         json_response: bool = True,
+        manage_dispatcher_runtime: bool = True,
         runtime_startup_timeout_seconds: float = 1.0,
         runtime_stop_join_timeout_seconds: float = 2.0,
         **fastmcp_kwargs: Any,
@@ -50,7 +51,7 @@ class OperationDispatcherMCPServer:
         else:
             self._operation_dispatcher_api = None
             self._operation_dispatcher = operation_dispatcher
-            self._manage_dispatcher_runtime = True
+            self._manage_dispatcher_runtime = manage_dispatcher_runtime
             self._runtime_controller = OperationDispatcherRuntimeController(
                 operation_dispatcher=operation_dispatcher,
                 startup_timeout_seconds=runtime_startup_timeout_seconds,
@@ -114,9 +115,15 @@ class OperationDispatcherMCPServer:
             state, _ = (
                 self._operation_dispatcher_api.get_operation_dispatcher_state_response()
             )
+            state = dict(state)
+            state["runtime_managed_by"] = "openapi"
             return state
 
-        return self._runtime_controller.get_state_payload()
+        state = self._runtime_controller.get_state_payload()
+        state["runtime_managed_by"] = (
+            "mcp" if self._manage_dispatcher_runtime else "external"
+        )
+        return state
 
     def start_dispatcher_runtime(self) -> dict[str, Any]:
         if self._operation_dispatcher_api is not None:
@@ -135,6 +142,8 @@ class OperationDispatcherMCPServer:
             }
 
         payload, _ = self._runtime_controller.start()
+        payload = dict(payload)
+        payload["state"] = self._dispatcher_state_payload()
         return payload
 
     def stop_dispatcher_runtime(self) -> dict[str, Any]:
@@ -154,6 +163,8 @@ class OperationDispatcherMCPServer:
             }
 
         payload, _ = self._runtime_controller.stop()
+        payload = dict(payload)
+        payload["state"] = self._dispatcher_state_payload()
         return payload
 
     def resume_dispatcher_runtime(self) -> dict[str, Any]:

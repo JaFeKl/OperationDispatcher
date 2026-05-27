@@ -550,12 +550,16 @@ class OperationDispatcher:
         data: dict[str, Any] | None = None,
     ) -> DispatchEvent:
         resolved_payload = {} if data is None else dict(data)
-        nil_uuid = UUID(int=0)
+
         operation_id = (
-            scheduled_operation.id if scheduled_operation is not None else nil_uuid
+            scheduled_operation.id if scheduled_operation is not None else None
         )
-        execution = self._executions_by_operation_id.get(operation_id)
-        execution_id = execution.id if execution is not None else nil_uuid
+        execution = (
+            self._executions_by_operation_id.get(operation_id)
+            if operation_id is not None
+            else None
+        )
+        execution_id = execution.id if execution is not None else None
 
         event = DispatchEvent(
             execution_id=execution_id,
@@ -564,8 +568,8 @@ class OperationDispatcher:
             payload=resolved_payload,
         )
         self._append_event_history(event)
-        if operation_id.int != 0:
-            self._append_operation_event(event.operation_id, event)
+        if operation_id is not None:
+            self._append_operation_event(operation_id, event)
         self._log_event(event)
         self._notification_handler.notify(event)
         self._notify_wakeup()

@@ -34,6 +34,8 @@ class CallbackDrivenDispatcher:
         self._logger.info(
             f"Received request {event.event_type} for operation_id {event.operation_id}"
         )
+        if event.operation_id is None:
+            return None
         scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
             event.operation_id
         )

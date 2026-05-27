@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import time
 
 import pytest
 
@@ -223,7 +224,10 @@ def test_openapi_dispatcher_stop_does_not_trigger_operation_cancel_request() -> 
 
     scheduled_operation = _scheduled_operation(resource_id="resource-a")
     dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+
+    deadline = time.time() + 0.5
+    while dispatcher.current_scheduled_operation is None and time.time() < deadline:
+        time.sleep(0.01)
 
     stop_payload, stop_status = dispatcher_api.stop_operation_dispatcher_response()
     assert stop_status == 202

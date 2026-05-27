@@ -76,8 +76,8 @@ class DispatchEvent(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    execution_id: UUID
-    operation_id: UUID
+    execution_id: UUID | None = None
+    operation_id: UUID | None = None
     event_type: EventType
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: dict[str, Any] = Field(default_factory=dict)

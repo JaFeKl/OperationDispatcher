@@ -1099,8 +1099,18 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
-                    "execution_id": {"type": "string", "format": "uuid"},
-                    "operation_id": {"type": "string", "format": "uuid"},
+                    "execution_id": {
+                        "oneOf": [
+                            {"type": "string", "format": "uuid"},
+                            {"type": "null"},
+                        ]
+                    },
+                    "operation_id": {
+                        "oneOf": [
+                            {"type": "string", "format": "uuid"},
+                            {"type": "null"},
+                        ]
+                    },
                     "event_type": {
                         "type": "string",
                         "enum": [event.value for event in EventType],

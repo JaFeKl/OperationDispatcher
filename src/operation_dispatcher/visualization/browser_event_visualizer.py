@@ -128,8 +128,12 @@ class BrowserEventVisualizer:
     ) -> None:
         event_details = {
             "id": str(event.id),
-            "execution_id": str(event.execution_id),
-            "operation_id": str(event.operation_id),
+            "execution_id": (
+                str(event.execution_id) if event.execution_id is not None else None
+            ),
+            "operation_id": (
+                str(event.operation_id) if event.operation_id is not None else None
+            ),
             "event_type": event.event_type.name,
             "event_type_value": event.event_type.value,
             "created_at": event.created_at.isoformat(),
@@ -195,7 +199,7 @@ class BrowserEventVisualizer:
             return None, None
 
         operation_id = event.operation_id
-        if operation_id.int == 0:
+        if operation_id is None:
             return None, None
 
         scheduled_operation = operation_dispatcher.get_scheduled_operation(operation_id)
@@ -489,8 +493,7 @@ _INDEX_HTML = """<!doctype html>
 
         const sourceClass = colorClassBySource[event.source] || 'source-custom';
         const operationId = event.operation_id || '';
-        const nilOperationId = '00000000-0000-0000-0000-000000000000';
-        const hasOperationContext = operationId !== '' && operationId !== nilOperationId;
+        const hasOperationContext = operationId !== '';
         const eventDetails = event.event_details || event.payload || {};
         const executionDetails = event.execution_details || null;
         const operationDetails = event.operation_details || null;
