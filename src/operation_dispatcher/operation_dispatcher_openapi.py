@@ -468,7 +468,7 @@ class OperationDispatcherOpenAPI:
     ) -> None:
         @app.route(route, methods=[method.upper()], endpoint=endpoint_name)
         @swag_from(openapi_spec)
-        def endpoint() -> tuple[Any, int]:
+        def endpoint(**_route_kwargs: Any) -> tuple[Any, int]:
             payload, status_code = response_handler()
             return jsonify(payload), status_code
 

@@ -262,6 +262,29 @@ def test_openapi_register_default_endpoints_exposes_new_contract_routes() -> Non
     assert client.get("/operation_dispatcher/queue").status_code == 404
 
 
+def test_openapi_cancel_endpoint_accepts_path_operation_id_kwarg() -> None:
+    pytest.importorskip("flask")
+    pytest.importorskip("flasgger")
+    from flask import Flask
+
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+    app = Flask(__name__)
+    dispatcher_api.register_default_endpoints(app)
+    client = app.test_client()
+
+    scheduled_operation = _scheduled_operation(resource_id="resource-a")
+    dispatcher.add(scheduled_operation)
+
+    response = client.post(f"/operations/{scheduled_operation.id}/cancel")
+
+    assert response.status_code == 200
+    response_payload = response.get_json()
+    assert response_payload is not None
+    assert response_payload["scheduled_operation"]["id"] == str(scheduled_operation.id)
+    assert response_payload["execution"]["state"] == ExecutionState.CANCELLED.value
+
+
 def test_openapi_definitions_include_operation_status_model() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
