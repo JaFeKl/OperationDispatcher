@@ -170,7 +170,7 @@ The dispatcher does not execute operations directly. Instead, it delegates execu
 
 `DispatchEvent` instances are emitted for runtime lifecycle, request handshakes, and operation lifecycle transitions.
 
-### Manager lifecycle events
+### Dispatcher lifecycle events
 
 - `OPERATION_DISPATCHER_STARTED`: emitted when `run()` enters its main loop.
 - `OPERATION_DISPATCHER_STOPPED`: emitted when the runtime loop exits and dispatcher state is cleaned up.
@@ -201,8 +201,7 @@ The dispatcher does not execute operations directly. Instead, it delegates execu
 ### How to interpret them
 
 - `*_REQUESTED` events are the handshake points where business logic decides whether the dispatcher may proceed.
-- `*_DENIED` events are feedback that the handshake rejected the action; for start requests they also drive retry/cooldown behavior.
-- manager events describe the dispatcher runtime itself,
+- dispatcher lifecycle events are emitted when the state of the operation dispatcher is changing.
 - operation lifecycle events describe what happened to a specific scheduled operation.
 
 
