@@ -9,9 +9,8 @@ def main() -> None:
     dispatch_queue.add(
         ScheduledOperation(
             payload={
-                "name": "move_to_station_1",
-                "source_station": "INBOUND_A",
-                "target_station": "BUFFER_01",
+                "name": "my_operation_1",
+                "my_custom_field": "hello world",
             },
             resource_id="robot-1",
             priority=10,
@@ -20,9 +19,8 @@ def main() -> None:
     dispatch_queue.add(
         ScheduledOperation(
             payload={
-                "name": "move_to_charging",
-                "source_station": "BUFFER_01",
-                "target_station": "CHARGER_1",
+                "name": "my_operation_2",
+                "my_custom_field": "goodbye world",
             },
             resource_id="robot-1",
             priority=5,

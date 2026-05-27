@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from uuid import UUID
 
@@ -15,20 +16,26 @@ from operation_dispatcher import (
 
 
 class VisualizedDispatcherDemo:
-    def __init__(self) -> None:
-        self._start_accept_delay_seconds = 1.0
+    def __init__(self, host: str, logger: logging.Logger | None = None) -> None:
+        self._logger = logger or logging.getLogger(__name__)
+        self.host = host
 
-        self._simulated_runner = SimulatedOperationRunner(
-            on_complete=self._on_completed,
-        )
+        self._start_accept_delay_seconds = 2.0
+
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
-            poll_interval_seconds=0.05,
+            logger=self._logger,
         )
+
+        self._simulated_runner = SimulatedOperationRunner(
+            on_complete=self._on_completed,
+            logger=self._logger,
+        )
+
         self.visualizer = BrowserEventVisualizer(
-            host="0.0.0.0",
+            host=self.host,
             port=8765,
             operation_dispatcher=self.operation_dispatcher,
         )
@@ -51,17 +58,6 @@ class VisualizedDispatcherDemo:
                 run_seconds=float(scheduled_operation.payload.get("run_seconds", 2.0)),
             )
             return True
-
-        if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
-            self._simulated_runner.cancel(operation_id=scheduled_operation.id)
-            return True
-
-        if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
-            return self._simulated_runner.pause(operation_id=scheduled_operation.id)
-
-        if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
-            return self._simulated_runner.resume(operation_id=scheduled_operation.id)
-
         return None
 
     def _on_notification(self, event: DispatchEvent) -> None:
@@ -73,7 +69,10 @@ class VisualizedDispatcherDemo:
             self.operation_dispatcher.complete_current()
 
     async def run_demo(self) -> None:
-        print(f"Event visualizer running at {self.visualizer.url}")
+        self._logger.info(f"Event visualizer running at {self.visualizer.url}")
+        self._logger.info(f"Starting in 10 seconds...")
+        await asyncio.sleep(10.0)
+        self._logger.info(f"Starting simulated demo operations...")
 
         self.operation_dispatcher.add(
             ScheduledOperation(
@@ -94,6 +93,7 @@ class VisualizedDispatcherDemo:
         await asyncio.sleep(30.0)
         self.operation_dispatcher.request_stop()
         await runtime_task
+        self._logger.info(f"Finished...")
 
     def shutdown(self) -> None:
         self._simulated_runner.cancel()
@@ -101,7 +101,9 @@ class VisualizedDispatcherDemo:
 
 
 async def main() -> None:
-    demo = VisualizedDispatcherDemo()
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    demo = VisualizedDispatcherDemo(host="0.0.0.0", logger=logger)
     try:
         await demo.run_demo()
     finally:

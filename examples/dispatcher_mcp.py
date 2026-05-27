@@ -20,10 +20,6 @@ class DemoDispatcherMCPService:
 
     def __init__(self, host: str, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
-        self._simulated_runner = SimulatedOperationRunner(
-            on_complete=self._on_completed,
-            logger=self._logger,
-        )
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
@@ -33,44 +29,22 @@ class DemoDispatcherMCPService:
         )
         self.mcp_server = OperationDispatcherMCPServer(
             self.operation_dispatcher,
-            name="Shared Operation Dispatcher MCP",
-            instructions=(
-                "Expose the shared operation dispatcher state. Additional tools can "
-                "be registered on this server before startup."
-            ),
+            name="Operation Dispatcher MCP Server",
+            instructions="This is an example MCP server exposing an OperationDispatcher instance.",
             host=host,
             json_response=True,
         )
 
-    def add_demo_operations(self) -> None:
-        self.operation_dispatcher.add(
-            ScheduledOperation(
-                payload={
-                    "name": "pickup_pallet",
-                    "source_station": "INBOUND_A",
-                    "target_station": "BUFFER_01",
-                    "pallet_id": "PALLET-1001",
-                    "run_seconds": 10.0,
-                },
-                resource_id="robot-1",
-                priority=0,
-            )
-        )
-        self.operation_dispatcher.add(
-            ScheduledOperation(
-                payload={
-                    "name": "dropoff_pallet",
-                    "source_station": "BUFFER_01",
-                    "target_station": "OUTBOUND_B",
-                    "pallet_id": "PALLET-1001",
-                    "run_seconds": 10.0,
-                },
-                resource_id="robot-1",
-                priority=0,
-            )
+        self._simulated_runner = SimulatedOperationRunner(
+            on_complete=self._on_completed,
+            logger=self._logger,
         )
 
     def _on_request(self, event: DispatchEvent) -> bool | None:
+        self._logger.info(
+            f"Received request {event.event_type} for operation_id {event.operation_id}"
+        )
+
         scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
             event.operation_id
         )
@@ -112,9 +86,7 @@ class DemoDispatcherMCPService:
 
     def _on_notification(self, event: DispatchEvent) -> None:
         self._logger.info(
-            "received event %s for operation_id %s",
-            event.event_type,
-            event.operation_id,
+            f"Received notification event {event.event_type} for operation_id {event.operation_id}"
         )
 
     def _on_completed(self, operation_id: UUID) -> None:
@@ -128,23 +100,48 @@ class DemoDispatcherMCPService:
 
         self.operation_dispatcher.complete_current()
 
-    def run(self) -> None:
+    def stop(self) -> None:
+        self._simulated_runner.cancel()
+
+    def run_demo(self) -> None:
+        self.operation_dispatcher.add(
+            ScheduledOperation(
+                payload={
+                    "name": "my_operation_1",
+                    "task": "pickup",
+                    "run_seconds": 10.0,
+                },
+                resource_id="robot-1",
+                priority=0,
+            )
+        )
+        self.operation_dispatcher.add(
+            ScheduledOperation(
+                payload={
+                    "name": "my_operation_2",
+                    "task": "dropoff",
+                    "run_seconds": 8.0,
+                },
+                resource_id="robot-1",
+                priority=0,
+            )
+        )
         self.mcp_server.run(transport="sse")
 
-    def stop(self) -> None:
+    def shutdown(self) -> None:
         self._simulated_runner.cancel()
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
 
-    service = DemoDispatcherMCPService(host="0.0.0.0")
-    service.add_demo_operations()
+    demo_mcp_dispatcher = DemoDispatcherMCPService(host="0.0.0.0", logger=logger)
 
     try:
-        service.run()
+        demo_mcp_dispatcher.run_demo()
     finally:
-        service.stop()
+        demo_mcp_dispatcher.shutdown()
 
 
 if __name__ == "__main__":

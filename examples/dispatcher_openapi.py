@@ -1,9 +1,7 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
-import time
-from collections.abc import Callable
 from uuid import UUID
 
 from flask import Flask, jsonify
@@ -23,14 +21,12 @@ from operation_dispatcher import SimulatedOperationRunner
 class DemoDispatcherService:
     def __init__(self, host: str, logger: logging.Logger | None = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
+        self.host = host
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
-            on_request_callback=self._on_request_handler,
-            on_notification_callback=self._on_notification_handler,
-            start_request_max_retries=3,
-            start_request_retry_cooldown_seconds=1.0,
-            request_event_timeout_seconds=2.0,
+            on_request_callback=self._on_request,
+            on_notification_callback=self._on_notification,
             logger=logger,
         )
 
@@ -47,35 +43,7 @@ class DemoDispatcherService:
             logger=logger,
         )
 
-    def add_demo_operations(self) -> None:
-        self.operation_dispatcher.add(
-            ScheduledOperation(
-                payload={
-                    "name": "pickup_pallet",
-                    "source_station": "INBOUND_A",
-                    "target_station": "BUFFER_01",
-                    "pallet_id": "PALLET-1001",
-                    "run_seconds": 10.0,
-                },
-                resource_id="robot-1",
-                priority=0,
-            )
-        )
-        self.operation_dispatcher.add(
-            ScheduledOperation(
-                payload={
-                    "name": "dropoff_pallet",
-                    "source_station": "BUFFER_01",
-                    "target_station": "OUTBOUND_B",
-                    "pallet_id": "PALLET-1001",
-                    "run_seconds": 10.0,
-                },
-                resource_id="robot-1",
-                priority=0,
-            )
-        )
-
-    def _on_request_handler(self, event: DispatchEvent) -> bool | None:
+    def _on_request(self, event: DispatchEvent) -> bool | None:
         """Request callback for all dispatcher events."""
         self._visualizer.on_request(event)
         self._logger.info(
@@ -138,16 +106,11 @@ class DemoDispatcherService:
 
         return None
 
-    def _on_notification_handler(self, event: DispatchEvent) -> None:
-        """
-        Notification callback for all dispatcher events.
-        In a real implementation, this could be used to trigger side effects in
-        response to state changes in the dispatcher, e.g. updating a dashboard or triggering other actions in the system.
-        """
-        self._visualizer.on_notification(event)
+    def _on_notification(self, event: DispatchEvent) -> None:
         self._logger.info(
-            f"Received event {event.event_type} for operation_id {event.operation_id}"
+            f"Received notification event {event.event_type} for operation_id {event.operation_id}"
         )
+        self._visualizer.on_notification(event)
 
     def _on_completed(self, operation_id: UUID) -> None:
         """Callback for simulated operation completion. This should be called when an operation is completed by the simulated runner."""
@@ -206,22 +169,46 @@ class DemoDispatcherService:
 
         return app
 
+    async def run_demo(self) -> None:
+        self.operation_dispatcher.add(
+            ScheduledOperation(
+                payload={
+                    "name": "my_operation_1",
+                    "task": "pickup",
+                    "run_seconds": 10.0,
+                },
+                resource_id="robot-1",
+                priority=0,
+            )
+        )
+        self.operation_dispatcher.add(
+            ScheduledOperation(
+                payload={
+                    "name": "my_operation_2",
+                    "task": "dropoff",
+                    "run_seconds": 8.0,
+                },
+                resource_id="robot-1",
+                priority=0,
+            )
+        )
+        app = self.create_app()
+        app.run(host=self.host, port=8000, debug=False, use_reloader=False)
+
     def shutdown(self) -> None:
         self._simulated_runner.cancel()
         self._visualizer.stop()
 
 
-if __name__ == "__main__":
+async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
-
-    host = "0.0.0.0"
-
-    demo_dispatcher = DemoDispatcherService(host=host, logger=logger)
-    demo_dispatcher.add_demo_operations()
-
-    app = demo_dispatcher.create_app()
+    demo_dispatcher = DemoDispatcherService(host="0.0.0.0", logger=logger)
     try:
-        app.run(host=host, port=8000, debug=False, use_reloader=False)
+        await demo_dispatcher.run_demo()
     finally:
         demo_dispatcher.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
