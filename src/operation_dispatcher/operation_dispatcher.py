@@ -7,7 +7,7 @@ import queue
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 from operation_dispatcher.dispatch_queue import DispatchQueue, SortRule
@@ -16,9 +16,8 @@ from operation_dispatcher.models import (
     EventType,
     ExecutionOutcome,
     ExecutionState,
-    OperationHistory,
-    OperationHistoryEntry,
-    OperationExecution,
+    History,
+    HistoryRecord,
     OperationDispatcherState,
     Operation,
     TerminationReason,
@@ -26,18 +25,44 @@ from operation_dispatcher.models import (
 from operation_dispatcher.notification_handler import NotificationHandler
 from operation_dispatcher.request_handler import RequestHandler
 from operation_dispatcher.retry_policy import RetryPolicy
+from operation_dispatcher.services import (
+    DispatcherEventService,
+    DispatcherHistoryService,
+    DispatcherMutationService,
+    DispatcherRuntimeService,
+    DispatcherStateStore,
+    OperationLifecycleService,
+)
+from operation_dispatcher.utils import get_changes
 
 
 @dataclass(frozen=True)
 class _CommandResult:
     accepted: bool
-    scheduled_operation: Operation | None = None
+    operation: Operation | None = None
 
 
-class OperationDispatcher:
+class OperationDispatcherReference:
     """
     Core operation dispatcher class responsible for managing the operation schedule, execution state, and event dispatching.
     """
+
+    _DEFAULT_UPDATABLE_FIELDS = frozenset(
+        {
+            "payload",
+            "priority",
+            "release_date",
+            "planned_duration",
+            "due_date",
+            "dependencies",
+            "state",
+            "outcome",
+            "termination_reason",
+            "retry_count",
+            "start_time",
+            "finish_time",
+        }
+    )
 
     def __init__(
         self,
@@ -47,13 +72,18 @@ class OperationDispatcher:
         start_request_retry_cooldown_seconds: float = 1.0,
         request_event_timeout_seconds: float = 5.0,
         default_planned_duration: int | None = None,
+        updatable_fields: list[str] | None = None,
         dispatch_queue_sort_rules: list[SortRule] | None = None,
         on_request_callback: (
             Callable[[DispatchEvent], bool | dict[str, Any] | None] | None
         ) = None,
         on_notification_callback: Callable[[DispatchEvent], object] | None = None,
         on_history_callback: (
-            Callable[[int | None, OperationHistory], OperationHistory | None] | None
+            Callable[
+                [int | None, History],
+                History | list[HistoryRecord] | None,
+            ]
+            | None
         ) = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -75,7 +105,6 @@ class OperationDispatcher:
             resource_id=resource_id,
             sort_rules=dispatch_queue_sort_rules,
         )
-        self._executions_by_operation_id: dict[UUID, OperationExecution] = {}
         self._events_by_operation_id: dict[UUID, list[DispatchEvent]] = {}
 
         request_retry_policy = RetryPolicy(
@@ -92,6 +121,7 @@ class OperationDispatcher:
         self._event_history: list[DispatchEvent] = []
         self._event_history_limit = 1000
         self._default_planned_duration = default_planned_duration
+        self._updatable_fields = self._resolve_updatable_fields(updatable_fields)
         self._on_history_callback = on_history_callback
 
         self._notification_handler = NotificationHandler(
@@ -105,7 +135,6 @@ class OperationDispatcher:
             request_event_timeout_seconds=request_event_timeout_seconds,
             append_event_history=self._append_event_history,
             append_operation_event=self._append_operation_event,
-            get_execution_id=self._get_execution_id,
             emit_event=self._emit_event,
             log_event=self._log_event,
             notify_wakeup=self._notify_wakeup,
@@ -117,15 +146,8 @@ class OperationDispatcher:
         return self._dispatch_queue
 
     @property
-    def current_scheduled_operation(self) -> Operation | None:
+    def current_operation(self) -> Operation | None:
         return self._dispatch_queue.pulled_operation
-
-    @property
-    def current_execution(self) -> OperationExecution | None:
-        current = self.current_scheduled_operation
-        if current is None:
-            return None
-        return self._executions_by_operation_id.get(current.id)
 
     @property
     def is_paused(self) -> bool:
@@ -142,49 +164,32 @@ class OperationDispatcher:
 
     def add(
         self,
-        scheduled_operation: Operation,
-        execution: Optional[OperationExecution] = None,
+        operation: Operation,
         apply_default_planned_duration: bool = True,
     ) -> None:
         self._execute_state_mutation(
             lambda: self._add_internal(
-                scheduled_operation,
-                execution,
+                operation,
                 apply_default_planned_duration,
             )
         )
 
     def _add_internal(
         self,
-        scheduled_operation: Operation,
-        execution: Optional[OperationExecution] = None,
+        operation: Operation,
         apply_default_planned_duration: bool = True,
     ) -> None:
-        if (
-            apply_default_planned_duration
-            and scheduled_operation.planned_duration is None
-            and self._default_planned_duration is not None
-        ):
-            scheduled_operation.planned_duration = self._default_planned_duration
+        self._apply_default_planned_duration(operation, apply_default_planned_duration)
 
-        self._dispatch_queue.add(scheduled_operation)
-        if execution is not None:
-            self._executions_by_operation_id[scheduled_operation.id] = execution
-        else:
-            self._executions_by_operation_id[scheduled_operation.id] = (
-                OperationExecution(operation_id=scheduled_operation.id)
-            )
-        self._events_by_operation_id.setdefault(scheduled_operation.id, [])
+        self._dispatch_queue.add(operation)
+        self._events_by_operation_id.setdefault(operation.id, [])
         self._emit_event(
             EventType.OPERATION_ADDED,
-            scheduled_operation=scheduled_operation,
+            operation=operation,
         )
 
     def get_schedule(self) -> list[Operation]:
         return self._dispatch_queue.list()
-
-    def get_execution(self, operation_id: UUID) -> OperationExecution | None:
-        return self._executions_by_operation_id.get(operation_id)
 
     def get_state(self) -> OperationDispatcherState:
         now = datetime.now(timezone.utc)
@@ -197,7 +202,7 @@ class OperationDispatcher:
             is_running=self.is_running,
             is_paused=self._is_paused,
             queue_size=len(self._dispatch_queue),
-            current_operation=self.current_scheduled_operation,
+            current_operation=self.current_operation,
             running_since=running_since,
             uptime_seconds=uptime_seconds,
         )
@@ -207,7 +212,7 @@ class OperationDispatcher:
 
     def _pause_internal(self) -> None:
         self._is_paused = True
-        self._set_current_execution_state(ExecutionState.PAUSED)
+        self._set_current_operation_state(ExecutionState.PAUSED)
         self._emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
 
     def resume_dispatcher_runtime(self) -> None:
@@ -222,27 +227,29 @@ class OperationDispatcher:
         if self._is_paused:
             return None
 
-        if self.current_scheduled_operation is not None:
+        if self.current_operation is not None:
             raise RuntimeError("an operation is already running")
 
-        scheduled_operation = self._dispatch_queue.next()
-        if scheduled_operation is None:
+        operation = self._dispatch_queue.next()
+        if operation is None:
             return None
 
-        self._transition_execution(
-            scheduled_operation,
+        old_operation = self._snapshot_operation(operation)
+        self._transition_operation_state(
+            operation,
             state=ExecutionState.RUNNING,
             set_start_time_if_missing=True,
         )
 
         self._emit_event(
             EventType.OPERATION_STARTED,
-            scheduled_operation=scheduled_operation,
+            operation=operation,
+            old_operation=old_operation,
         )
-        return scheduled_operation
+        return operation
 
     async def run_once(self) -> Operation | None:
-        if self._is_paused or self.current_scheduled_operation is not None:
+        if self._is_paused or self.current_operation is not None:
             return None
 
         next_operation = self._dispatch_queue.peek()
@@ -303,41 +310,45 @@ class OperationDispatcher:
         return self._execute_state_mutation(self._complete_current_internal)
 
     def _complete_current_internal(self) -> Operation:
-        scheduled_operation = self._require_current_scheduled_operation()
-        self._transition_execution(
-            scheduled_operation,
+        operation = self._require_current_operation()
+        old_operation = self._snapshot_operation(operation)
+        self._transition_operation_state(
+            operation,
             state=ExecutionState.COMPLETED,
             outcome=ExecutionOutcome.SUCCESS,
             termination_reason=TerminationReason.NONE,
             set_finish_time=True,
         )
 
-        self._dispatch_queue.complete(scheduled_operation)
+        self._dispatch_queue.complete(operation)
         self._emit_event(
             EventType.OPERATION_COMPLETED,
-            scheduled_operation=scheduled_operation,
+            operation=operation,
+            old_operation=old_operation,
         )
-        return scheduled_operation
+        return operation
 
     def fail_current(self) -> Operation:
         return self._execute_state_mutation(self._fail_current_internal)
 
     def _fail_current_internal(self) -> Operation:
-        scheduled_operation = self._require_current_scheduled_operation()
-        self._transition_execution(
-            scheduled_operation,
+        operation = self._require_current_operation()
+        old_operation = self._snapshot_operation(operation)
+        self._transition_operation_state(
+            operation,
             state=ExecutionState.FAILED,
             outcome=ExecutionOutcome.FAILURE,
             termination_reason=TerminationReason.INTERNAL_ERROR,
             set_finish_time=True,
         )
 
-        self._dispatch_queue.complete(scheduled_operation)
+        self._dispatch_queue.complete(operation)
         self._emit_event(
             EventType.OPERATION_FAILED,
-            scheduled_operation=scheduled_operation,
+            operation=operation,
+            old_operation=old_operation,
         )
-        return scheduled_operation
+        return operation
 
     def pause_current_operation(self, enforce_running_state: bool = True) -> bool:
         result: _CommandResult = self._execute_state_mutation(
@@ -346,26 +357,27 @@ class OperationDispatcher:
         return result.accepted
 
     def _pause_current_internal(self, enforce_running_state: bool) -> _CommandResult:
-        scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.id)
-        if enforce_running_state and execution.state is not ExecutionState.RUNNING:
+        operation = self._require_current_operation()
+        if enforce_running_state and operation.state is not ExecutionState.RUNNING:
             raise RuntimeError("current operation is not running")
 
         if not self._request_handler.request_operation_with_retry_sync(
-            scheduled_operation,
+            operation,
             EventType.OPERATION_PAUSE_REQUESTED,
         ):
-            return _CommandResult(False, scheduled_operation)
+            return _CommandResult(False, operation)
 
-        self._transition_execution(
-            scheduled_operation,
+        old_operation = self._snapshot_operation(operation)
+        self._transition_operation_state(
+            operation,
             state=ExecutionState.PAUSED,
         )
         self._emit_event(
             EventType.OPERATION_PAUSED,
-            scheduled_operation=scheduled_operation,
+            operation=operation,
+            old_operation=old_operation,
         )
-        return _CommandResult(True, scheduled_operation)
+        return _CommandResult(True, operation)
 
     def resume_current_operation(self, enforce_paused_state: bool = True) -> bool:
         result: _CommandResult = self._execute_state_mutation(
@@ -374,28 +386,29 @@ class OperationDispatcher:
         return result.accepted
 
     def _resume_current_internal(self, enforce_paused_state: bool) -> _CommandResult:
-        scheduled_operation = self._require_current_scheduled_operation()
-        execution = self._require_execution(scheduled_operation.id)
-        if enforce_paused_state and execution.state is not ExecutionState.PAUSED:
+        operation = self._require_current_operation()
+        if enforce_paused_state and operation.state is not ExecutionState.PAUSED:
             raise RuntimeError("current operation is not paused")
 
         accepted = self._request_handler.request_operation_with_retry_sync(
-            scheduled_operation,
+            operation,
             EventType.OPERATION_RESUME_REQUESTED,
         )
 
         if not accepted:
-            return _CommandResult(False, scheduled_operation)
+            return _CommandResult(False, operation)
 
-        self._transition_execution(
-            scheduled_operation,
+        old_operation = self._snapshot_operation(operation)
+        self._transition_operation_state(
+            operation,
             state=ExecutionState.RUNNING,
         )
         self._emit_event(
             EventType.OPERATION_RESUMED,
-            scheduled_operation=scheduled_operation,
+            operation=operation,
+            old_operation=old_operation,
         )
-        return _CommandResult(True, scheduled_operation)
+        return _CommandResult(True, operation)
 
     def cancel(self, operation_id: UUID) -> Operation | None:
         result: _CommandResult = self._execute_state_mutation(
@@ -403,24 +416,25 @@ class OperationDispatcher:
         )
         if not result.accepted:
             return None
-        return result.scheduled_operation
+        return result.operation
 
     def _cancel_internal(self, operation_id: UUID) -> _CommandResult:
-        scheduled_operation = self.get_scheduled_operation(operation_id)
-        if scheduled_operation is None:
+        operation = self.get_operation(operation_id)
+        if operation is None:
             return _CommandResult(False)
 
         if not self._request_handler.request_operation_with_retry_sync(
-            scheduled_operation,
+            operation,
             EventType.OPERATION_CANCEL_REQUESTED,
         ):
-            return _CommandResult(False, scheduled_operation)
+            return _CommandResult(False, operation)
 
         cancelled_operation = self._dispatch_queue.cancel(operation_id)
         if cancelled_operation is None:
-            return _CommandResult(False, scheduled_operation)
+            return _CommandResult(False, operation)
 
-        self._transition_execution(
+        old_operation = self._snapshot_operation(cancelled_operation)
+        self._transition_operation_state(
             cancelled_operation,
             state=ExecutionState.CANCELLED,
             outcome=ExecutionOutcome.CANCELLED,
@@ -431,9 +445,56 @@ class OperationDispatcher:
         self._request_handler.clear_request_retry_state(cancelled_operation.id)
         self._emit_event(
             EventType.OPERATION_CANCELLED,
-            scheduled_operation=cancelled_operation,
+            operation=cancelled_operation,
+            old_operation=old_operation,
         )
         return _CommandResult(True, cancelled_operation)
+
+    def update(self, operation_id: UUID, updates: dict[str, Any]) -> Operation | None:
+        return self._execute_state_mutation(
+            lambda: self._update_internal(operation_id, updates)
+        )
+
+    def _update_internal(
+        self,
+        operation_id: UUID,
+        updates: dict[str, Any],
+    ) -> Operation | None:
+        operation = self.get_operation(operation_id)
+        if operation is None:
+            return None
+
+        if not updates:
+            return operation
+
+        if (
+            self.current_operation is not None
+            and self.current_operation.id == operation_id
+            and operation.state is ExecutionState.RUNNING
+        ):
+            raise RuntimeError("cannot update a running operation")
+
+        invalid_fields = sorted(set(updates) - self._updatable_fields)
+        if invalid_fields:
+            raise ValueError(f"unsupported operation update fields: {invalid_fields}")
+
+        candidate_data = operation.model_dump()
+        candidate_data.update(updates)
+        validated_operation = Operation.model_validate(candidate_data)
+
+        old_operation = self._snapshot_operation(operation)
+        for field in updates:
+            new_value = getattr(validated_operation, field)
+            setattr(operation, field, new_value)
+
+        if old_operation.model_dump() != operation.model_dump():
+            self._emit_event(
+                EventType.OPERATION_UPDATED,
+                operation=operation,
+                old_operation=old_operation,
+            )
+
+        return operation
 
     def get_event_history(self, limit: int | None = None) -> list[DispatchEvent]:
         if limit is None:
@@ -443,7 +504,7 @@ class OperationDispatcher:
     def get_history(
         self,
         limit: int | None = None,
-    ) -> OperationHistory:
+    ) -> History:
         in_memory_history = self._get_in_memory_history(limit)
         if self._on_history_callback is None:
             return in_memory_history
@@ -451,48 +512,43 @@ class OperationDispatcher:
         callback_result = self._on_history_callback(limit, in_memory_history)
         if callback_result is None:
             return in_memory_history
-        if isinstance(callback_result, OperationHistory):
+        if isinstance(callback_result, History):
             return callback_result
 
-        return OperationHistory(
-            number_of_entries=len(callback_result),
-            entries=callback_result,
+        return History(
+            num_records=len(callback_result),
+            records=callback_result,
         )
 
     def _get_in_memory_history(
         self,
         limit: int | None,
-    ) -> OperationHistory:
+    ) -> History:
         history_operations = self._dispatch_queue.history(limit=limit)
-        history_entries: list[OperationHistoryEntry] = []
+        history_records: list[HistoryRecord] = []
 
-        for scheduled_operation in history_operations:
-            operation_id = scheduled_operation.id
-            execution = self._executions_by_operation_id.get(operation_id)
-            if execution is None:
-                continue
-
+        for operation in history_operations:
+            operation_id = operation.id
             operation_events = list(self._events_by_operation_id.get(operation_id, []))
-            history_entries.append(
-                OperationHistoryEntry(
-                    scheduled_operation=scheduled_operation,
-                    execution=[execution],
+            history_records.append(
+                HistoryRecord(
+                    operation=operation,
                     events=operation_events,
                 )
             )
 
-        return OperationHistory(
-            number_of_entries=len(history_entries),
-            entries=history_entries,
+        return History(
+            num_records=len(history_records),
+            records=history_records,
         )
 
-    def _require_current_scheduled_operation(self) -> Operation:
-        scheduled_operation = self.current_scheduled_operation
-        if scheduled_operation is None:
+    def _require_current_operation(self) -> Operation:
+        operation = self.current_operation
+        if operation is None:
             raise RuntimeError("no current operation")
-        return scheduled_operation
+        return operation
 
-    def get_scheduled_operation(self, operation_id: UUID) -> Operation | None:
+    def get_operation(self, operation_id: UUID) -> Operation | None:
         return self._dispatch_queue.get(operation_id)
 
     async def _wait_for_next_signal(self) -> None:
@@ -546,26 +602,24 @@ class OperationDispatcher:
     def _emit_event(
         self,
         event_type: EventType,
-        scheduled_operation: Operation | None = None,
-        data: dict[str, Any] | None = None,
+        operation: Operation | None = None,
+        meta_data: dict[str, Any] | None = None,
+        old_operation: Operation | None = None,
     ) -> DispatchEvent:
-        resolved_payload = {} if data is None else dict(data)
+        resolved_meta_data = {} if meta_data is None else dict(meta_data)
+        resolved_changes = (
+            get_changes(old_operation, operation)
+            if old_operation is not None and operation is not None
+            else []
+        )
 
-        operation_id = (
-            scheduled_operation.id if scheduled_operation is not None else None
-        )
-        execution = (
-            self._executions_by_operation_id.get(operation_id)
-            if operation_id is not None
-            else None
-        )
-        execution_id = execution.id if execution is not None else None
+        operation_id = operation.id if operation is not None else None
 
         event = DispatchEvent(
-            execution_id=execution_id,
             operation_id=operation_id,
             event_type=event_type,
-            payload=resolved_payload,
+            changes=resolved_changes,
+            meta_data=resolved_meta_data,
         )
         self._append_event_history(event)
         if operation_id is not None:
@@ -574,6 +628,37 @@ class OperationDispatcher:
         self._notification_handler.notify(event)
         self._notify_wakeup()
         return event
+
+    def _snapshot_operation(self, operation: Operation) -> Operation:
+        return operation.model_copy(deep=True)
+
+    def _apply_default_planned_duration(
+        self,
+        operation: Operation,
+        apply_default_planned_duration: bool,
+    ) -> None:
+        if (
+            apply_default_planned_duration
+            and operation.planned_duration is None
+            and self._default_planned_duration is not None
+        ):
+            operation.planned_duration = self._default_planned_duration
+
+    @classmethod
+    def _resolve_updatable_fields(
+        cls,
+        updatable_fields: list[str] | None,
+    ) -> frozenset[str]:
+        if updatable_fields is None:
+            return cls._DEFAULT_UPDATABLE_FIELDS
+
+        resolved_fields = frozenset(updatable_fields)
+        unknown_fields = sorted(resolved_fields - cls._DEFAULT_UPDATABLE_FIELDS)
+        if unknown_fields:
+            raise ValueError(
+                f"updatable_fields contains unsupported fields: {unknown_fields}"
+            )
+        return resolved_fields
 
     def _append_event_history(self, event: DispatchEvent) -> None:
         self._event_history.append(event)
@@ -645,45 +730,254 @@ class OperationDispatcher:
             return payload
         raise payload  # type: ignore[misc]
 
-    def _require_execution(self, operation_id: UUID) -> OperationExecution:
-        execution = self._executions_by_operation_id.get(operation_id)
-        if execution is None:
-            raise RuntimeError(f"missing execution state for operation {operation_id}")
-        return execution
-
-    def _transition_execution(
+    def _transition_operation_state(
         self,
-        scheduled_operation: Operation,
+        operation: Operation,
         *,
         state: ExecutionState,
         outcome: ExecutionOutcome | None = None,
         termination_reason: TerminationReason | None = None,
         set_finish_time: bool = False,
         set_start_time_if_missing: bool = False,
-    ) -> OperationExecution:
-        execution = self._require_execution(scheduled_operation.id)
-        execution.state = state
+    ) -> Operation:
+        operation.state = state
         if outcome is not None:
-            execution.outcome = outcome
+            operation.outcome = outcome
         if termination_reason is not None:
-            execution.termination_reason = termination_reason
-        if set_start_time_if_missing and execution.start_time is None:
-            execution.start_time = datetime.now(timezone.utc)
+            operation.termination_reason = termination_reason
+        if set_start_time_if_missing and operation.start_time is None:
+            operation.start_time = datetime.now(timezone.utc)
         if set_finish_time:
-            execution.finish_time = datetime.now(timezone.utc)
-        return execution
+            operation.finish_time = datetime.now(timezone.utc)
+        return operation
 
-    def _set_current_execution_state(self, state: ExecutionState) -> None:
-        current = self.current_scheduled_operation
+    def _set_current_operation_state(self, state: ExecutionState) -> None:
+        current = self.current_operation
         if current is None:
             return
-        execution = self._executions_by_operation_id.get(current.id)
-        if execution is None:
-            return
-        execution.state = state
+        current.state = state
 
-    def _get_execution_id(self, operation_id: UUID) -> UUID | None:
-        execution = self._executions_by_operation_id.get(operation_id)
-        if execution is None:
-            return None
-        return execution.id
+
+class OperationDispatcher:
+
+    _DEFAULT_UPDATABLE_FIELDS = frozenset(
+        {
+            "payload",
+            "priority",
+            "release_date",
+            "planned_duration",
+            "due_date",
+            "dependencies",
+            "state",
+            "outcome",
+            "termination_reason",
+            "retry_count",
+            "start_time",
+            "finish_time",
+        }
+    )
+
+    def __init__(
+        self,
+        resource_id: str,
+        poll_interval_seconds: float = 0.1,
+        start_request_max_retries: int = 5,
+        start_request_retry_cooldown_seconds: float = 1.0,
+        request_event_timeout_seconds: float = 5.0,
+        default_planned_duration: int | None = None,
+        updatable_fields: list[str] | None = None,
+        dispatch_queue_sort_rules: list[SortRule] | None = None,
+        on_request_callback: (
+            Callable[[DispatchEvent], bool | dict[str, Any] | None] | None
+        ) = None,
+        on_notification_callback: Callable[[DispatchEvent], object] | None = None,
+        on_history_callback: (
+            Callable[
+                [int | None, History],
+                History | list[HistoryRecord] | None,
+            ]
+            | None
+        ) = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        if poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be greater than 0")
+        if start_request_max_retries <= 0:
+            raise ValueError("start_request_max_retries must be greater than 0")
+        if start_request_retry_cooldown_seconds < 0:
+            raise ValueError(
+                "start_request_retry_cooldown_seconds must be non-negative"
+            )
+        if request_event_timeout_seconds <= 0:
+            raise ValueError("request_event_timeout_seconds must be greater than 0")
+        if default_planned_duration is not None and default_planned_duration <= 0:
+            raise ValueError("default_planned_duration must be > 0")
+
+        dispatch_queue = DispatchQueue(
+            resource_id=resource_id,
+            sort_rules=dispatch_queue_sort_rules,
+        )
+        updatable_fields_set = self._resolve_updatable_fields(updatable_fields)
+
+        self._state_store = DispatcherStateStore(
+            dispatch_queue=dispatch_queue,
+            logger=logger,
+            poll_interval_seconds=poll_interval_seconds,
+            default_planned_duration=default_planned_duration,
+            updatable_fields=updatable_fields_set,
+            on_history_callback=on_history_callback,
+        )
+
+        self._mutation_service = DispatcherMutationService(self._state_store)
+        self._event_service = DispatcherEventService(
+            self._state_store,
+            notify_wakeup=lambda: self._runtime_service.notify_wakeup(),
+        )
+        self._runtime_service = DispatcherRuntimeService(
+            self._state_store,
+            self._mutation_service,
+            self._event_service,
+        )
+        self._operation_service = OperationLifecycleService(
+            self._state_store,
+            self._mutation_service,
+            self._event_service,
+        )
+        self._history_service = DispatcherHistoryService(self._state_store)
+
+        request_retry_policy = RetryPolicy(
+            max_retries=start_request_max_retries,
+            retry_cooldown_seconds=start_request_retry_cooldown_seconds,
+        )
+
+        self._state_store.notification_handler = NotificationHandler(
+            on_notification_callback=on_notification_callback,
+            runtime_loop_getter=lambda: self._state_store.runtime_loop,
+            logger=logger,
+        )
+        self._state_store.request_handler = RequestHandler(
+            on_request_callback=on_request_callback,
+            request_retry_policy=request_retry_policy,
+            request_event_timeout_seconds=request_event_timeout_seconds,
+            append_event_history=self._event_service.append_event_history,
+            append_operation_event=self._event_service.append_operation_event,
+            emit_event=self._event_service.emit_event,
+            log_event=self._event_service.log_event,
+            notify_wakeup=self._runtime_service.notify_wakeup,
+            pause=self._runtime_service.pause_dispatcher_runtime,
+        )
+
+    @property
+    def dispatch_queue(self) -> DispatchQueue:
+        return self._operation_service.dispatch_queue
+
+    @property
+    def current_operation(self) -> Operation | None:
+        return self._operation_service.current_operation
+
+    @property
+    def is_paused(self) -> bool:
+        return self._runtime_service.is_paused
+
+    @property
+    def is_running(self) -> bool:
+        return self._runtime_service.is_running
+
+    def get_operation(self, operation_id: UUID) -> Operation | None:
+        return self._operation_service.get_operation(operation_id)
+
+    # Operation lifecycle methods
+
+    def add_operation(
+        self,
+        operation: Operation,
+        apply_default_planned_duration: bool = True,
+    ) -> None:
+        self._operation_service.add(
+            operation=operation,
+            apply_default_planned_duration=apply_default_planned_duration,
+        )
+
+    def update_operation(
+        self, operation_id: UUID, updates: dict[str, Any]
+    ) -> Operation | None:
+        return self._operation_service.update(operation_id, updates)
+
+    def cancel_operation(self, operation_id: UUID) -> Operation | None:
+        return self._operation_service.cancel(operation_id)
+
+    def pause_operation(
+        self,
+        operation_id: UUID,
+        enforce_running_state: bool = True,
+    ) -> bool:
+        return self._operation_service.pause_operation(
+            operation_id=operation_id,
+            enforce_running_state=enforce_running_state
+        )
+
+    def resume_operation(
+        self,
+        operation_id: UUID,
+        enforce_paused_state: bool = True,
+    ) -> bool:
+        return self._operation_service.resume_operation(
+            operation_id=operation_id,
+            enforce_paused_state=enforce_paused_state
+        )
+
+    def complete_operation(self, operation_id: UUID) -> Operation:
+        return self._operation_service.complete_operation(operation_id)
+
+    def fail_operation(self, operation_id: UUID) -> Operation:
+        return self._operation_service.fail_operation(operation_id)
+
+    def get_schedule(self) -> list[Operation]:
+        return self._operation_service.get_schedule()
+
+    # Dispatcher runtime methods
+
+    def get_state(self) -> OperationDispatcherState:
+        return self._runtime_service.get_state()
+
+    def pause_dispatcher_runtime(self) -> None:
+        self._runtime_service.pause_dispatcher_runtime()
+
+    def resume_dispatcher_runtime(self) -> None:
+        self._runtime_service.resume_dispatcher_runtime()
+
+    async def step_dispatch(self) -> Operation | None:
+        return await self._runtime_service.step_dispatch()
+
+    async def run(self) -> None:
+        await self._runtime_service.run()
+
+    def request_stop(self) -> None:
+        self._runtime_service.request_stop()
+
+    # History
+
+    def get_event_history(self, limit: int | None = None) -> list[DispatchEvent]:
+        return self._history_service.get_event_history(limit=limit)
+
+    def get_history(
+        self,
+        limit: int | None = None,
+    ) -> History:
+        return self._history_service.get_history(limit=limit)
+
+    @classmethod
+    def _resolve_updatable_fields(
+        cls,
+        updatable_fields: list[str] | None,
+    ) -> frozenset[str]:
+        if updatable_fields is None:
+            return cls._DEFAULT_UPDATABLE_FIELDS
+
+        resolved_fields = frozenset(updatable_fields)
+        unknown_fields = sorted(resolved_fields - cls._DEFAULT_UPDATABLE_FIELDS)
+        if unknown_fields:
+            raise ValueError(
+                f"updatable_fields contains unsupported fields: {unknown_fields}"
+            )
+        return resolved_fields

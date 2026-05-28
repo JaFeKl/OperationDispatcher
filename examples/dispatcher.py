@@ -36,19 +36,17 @@ class CallbackDrivenDispatcher:
         )
         if event.operation_id is None:
             return None
-        scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
-            event.operation_id
-        )
-        if scheduled_operation is None:
+        operation = self.operation_dispatcher.get_operation(event.operation_id)
+        if operation is None:
             return None
 
         if event.event_type is EventType.OPERATION_START_REQUESTED:
-            run_seconds = float(scheduled_operation.payload.get("run_seconds", 1.0))
+            run_seconds = float(operation.payload.get("run_seconds", 1.0))
             self._simulated_runner.start(
-                operation_id=scheduled_operation.id,
+                operation_id=operation.id,
                 run_seconds=run_seconds,
             )
-            print("Started operation with payload:", scheduled_operation.payload)
+            print("Started operation with payload:", operation.payload)
             return True
         return None
 
@@ -58,12 +56,10 @@ class CallbackDrivenDispatcher:
         )
 
     def _on_completed(self, operation_id: UUID) -> None:
-        current = self.operation_dispatcher.current_scheduled_operation
-        if current is not None and current.id == operation_id:
-            self.operation_dispatcher.complete_current()
+        self.operation_dispatcher.complete_operation(operation_id)
 
     async def run_demo(self) -> None:
-        self.operation_dispatcher.add(
+        self.operation_dispatcher.add_operation(
             Operation(
                 payload={
                     "name": "my_operation_1",
@@ -74,7 +70,7 @@ class CallbackDrivenDispatcher:
                 priority=0,
             )
         )
-        self.operation_dispatcher.add(
+        self.operation_dispatcher.add_operation(
             Operation(
                 payload={
                     "name": "my_operation_2",
@@ -92,9 +88,9 @@ class CallbackDrivenDispatcher:
 
         print("\nCompleted operations:")
         history = self.operation_dispatcher.get_history()
-        for entry in history.entries:
+        for record in history.records:
             print(
-                f"- {entry.scheduled_operation.id} - {entry.scheduled_operation.payload.get('name', 'unknown')}"
+                f"- {record.operation.id} - {record.operation.payload.get('name', 'unknown')}"
             )
 
     def shutdown(self) -> None:

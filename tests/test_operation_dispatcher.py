@@ -1,24 +1,22 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
 
 from operation_dispatcher import (
     EventType,
     ExecutionOutcome,
-    OperationExecution,
     ExecutionState,
-    OperationDispatcher,
-    OperationHistory,
-    OperationHistoryEntry,
-    OperationDispatcherState,
+    History,
+    HistoryRecord,
     Operation,
+    OperationDispatcher,
+    OperationDispatcherState,
     TerminationReason,
 )
 
 DispatcherEventType = EventType
 
 
-def _scheduled_operation(
+def _operation(
     *,
     resource_id: str = "resource-a",
     release_date: datetime | None = None,
@@ -34,47 +32,26 @@ def _scheduled_operation(
     )
 
 
-def test_dispatcher_starts_and_completes_current_operation() -> None:
+def test_dispatcher_starts_and_completes_operation() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    started = dispatcher._start_next()
+    started = asyncio.run(dispatcher.step_dispatch())
 
-    assert started is scheduled_operation
-    assert dispatcher.current_scheduled_operation is scheduled_operation
+    assert started is operation
+    assert dispatcher.current_operation is operation
+    assert operation.state is ExecutionState.RUNNING
+    assert operation.outcome is ExecutionOutcome.NONE
+    assert operation.termination_reason is TerminationReason.NONE
 
-    execution = dispatcher.get_execution(scheduled_operation.id)
-    assert execution is not None
-    assert execution.state is ExecutionState.RUNNING
-    assert execution.outcome is ExecutionOutcome.NONE
-    assert execution.termination_reason is TerminationReason.NONE
+    completed = dispatcher.complete_operation(operation.id)
 
-    completed = dispatcher.complete_current()
-    assert completed is scheduled_operation
-    assert dispatcher.current_scheduled_operation is None
-
-    execution_after_complete = dispatcher.get_execution(scheduled_operation.id)
-    assert execution_after_complete is not None
-    assert execution_after_complete.state is ExecutionState.COMPLETED
-    assert execution_after_complete.outcome is ExecutionOutcome.SUCCESS
-    assert execution_after_complete.finish_time is not None
-
-
-def test_dispatcher_add_reuses_provided_execution() -> None:
-    dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    existing_execution = OperationExecution(
-        operation_id=scheduled_operation.id,
-        state=ExecutionState.PAUSED,
-    )
-
-    dispatcher.add(scheduled_operation, execution=existing_execution)
-
-    execution = dispatcher.get_execution(scheduled_operation.id)
-    assert execution is existing_execution
-    assert execution is not None
-    assert execution.state is ExecutionState.PAUSED
+    assert completed is operation
+    assert dispatcher.current_operation is None
+    assert operation.state is ExecutionState.COMPLETED
+    assert operation.outcome is ExecutionOutcome.SUCCESS
+    assert operation.finish_time is not None
 
 
 def test_dispatcher_add_applies_default_planned_duration() -> None:
@@ -82,11 +59,11 @@ def test_dispatcher_add_applies_default_planned_duration() -> None:
         resource_id="resource-a",
         default_planned_duration=500,
     )
-    scheduled_operation = _scheduled_operation(planned_duration=None)
+    operation = _operation(planned_duration=None)
 
-    dispatcher.add(scheduled_operation)
+    dispatcher.add_operation(operation)
 
-    added = dispatcher.get_scheduled_operation(scheduled_operation.id)
+    added = dispatcher.get_operation(operation.id)
     assert added is not None
     assert added.planned_duration == 500
 
@@ -96,11 +73,11 @@ def test_dispatcher_add_keeps_explicit_planned_duration() -> None:
         resource_id="resource-a",
         default_planned_duration=500,
     )
-    scheduled_operation = _scheduled_operation(planned_duration=1200)
+    operation = _operation(planned_duration=1200)
 
-    dispatcher.add(scheduled_operation)
+    dispatcher.add_operation(operation)
 
-    added = dispatcher.get_scheduled_operation(scheduled_operation.id)
+    added = dispatcher.get_operation(operation.id)
     assert added is not None
     assert added.planned_duration == 1200
 
@@ -110,11 +87,11 @@ def test_dispatcher_add_can_skip_default_planned_duration() -> None:
         resource_id="resource-a",
         default_planned_duration=500,
     )
-    scheduled_operation = _scheduled_operation(planned_duration=None)
+    operation = _operation(planned_duration=None)
 
-    dispatcher.add(scheduled_operation, apply_default_planned_duration=False)
+    dispatcher.add_operation(operation, apply_default_planned_duration=False)
 
-    added = dispatcher.get_scheduled_operation(scheduled_operation.id)
+    added = dispatcher.get_operation(operation.id)
     assert added is not None
     assert added.planned_duration is None
 
@@ -127,30 +104,6 @@ def test_dispatcher_rejects_non_positive_default_planned_duration() -> None:
         assert str(error) == "default_planned_duration must be > 0"
 
 
-def test_dispatcher_add_with_provided_execution_emits_added_event_with_execution_id() -> (
-    None
-):
-    seen_events = []
-
-    def notification_callback(event) -> None:
-        seen_events.append(event)
-
-    dispatcher = OperationDispatcher(
-        resource_id="resource-a",
-        on_notification_callback=notification_callback,
-    )
-    scheduled_operation = _scheduled_operation()
-    existing_execution = OperationExecution(operation_id=scheduled_operation.id)
-
-    dispatcher.add(scheduled_operation, execution=existing_execution)
-
-    assert len(seen_events) == 1
-    added_event = seen_events[0]
-    assert added_event.event_type is DispatcherEventType.OPERATION_ADDED
-    assert added_event.operation_id == scheduled_operation.id
-    assert added_event.execution_id == existing_execution.id
-
-
 def test_dispatcher_add_normalizes_created_at_to_utc() -> None:
     seen_events = []
 
@@ -161,22 +114,20 @@ def test_dispatcher_add_normalizes_created_at_to_utc() -> None:
         resource_id="resource-a",
         on_notification_callback=notification_callback,
     )
-    scheduled_operation = Operation(
+    operation = Operation(
         payload={},
         resource_id="resource-a",
         created_at=datetime(2026, 5, 25, 10, 0, tzinfo=timezone(timedelta(hours=2))),
     )
 
-    dispatcher.add(scheduled_operation)
+    dispatcher.add_operation(operation)
 
-    assert scheduled_operation.created_at.tzinfo is timezone.utc
+    assert operation.created_at.tzinfo is timezone.utc
     assert len(seen_events) == 1
-    added_event = seen_events[0]
-    assert added_event.event_type is DispatcherEventType.OPERATION_ADDED
-    assert added_event.created_at.tzinfo is timezone.utc
+    assert seen_events[0].event_type is DispatcherEventType.OPERATION_ADDED
 
 
-def test_dispatcher_run_once_starts_operation_when_requests_allowed() -> None:
+def test_dispatcher_step_dispatch_starts_operation_when_requests_allowed() -> None:
     seen_events: list[DispatcherEventType] = []
 
     def request_and_notification_callback(event) -> bool | None:
@@ -188,12 +139,12 @@ def test_dispatcher_run_once_starts_operation_when_requests_allowed() -> None:
         on_request_callback=request_and_notification_callback,
         on_notification_callback=request_and_notification_callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    executed = asyncio.run(dispatcher.run_once())
+    executed = asyncio.run(dispatcher.step_dispatch())
 
-    assert executed is scheduled_operation
+    assert executed is operation
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_START_REQUESTED,
@@ -201,19 +152,19 @@ def test_dispatcher_run_once_starts_operation_when_requests_allowed() -> None:
     ]
 
 
-def test_dispatcher_pause_blocks_start_until_resumed() -> None:
+def test_dispatcher_pause_blocks_step_dispatch_until_resumed() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
     dispatcher.pause_dispatcher_runtime()
-    assert dispatcher._start_next() is None
+    assert asyncio.run(dispatcher.step_dispatch()) is None
 
     dispatcher.resume_dispatcher_runtime()
-    assert dispatcher._start_next() is scheduled_operation
+    assert asyncio.run(dispatcher.step_dispatch()) is operation
 
 
-def test_dispatcher_cancel_queued_operation_sets_execution_cancelled() -> None:
+def test_dispatcher_cancel_queued_operation_sets_cancelled_state() -> None:
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
@@ -227,18 +178,16 @@ def test_dispatcher_cancel_queued_operation_sets_execution_cancelled() -> None:
         on_request_callback=callback,
         on_notification_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    cancelled = dispatcher.cancel(scheduled_operation.id)
+    cancelled = dispatcher.cancel_operation(operation.id)
 
-    assert cancelled is scheduled_operation
-    execution = dispatcher.get_execution(scheduled_operation.id)
-    assert execution is not None
-    assert execution.state is ExecutionState.CANCELLED
-    assert execution.outcome is ExecutionOutcome.CANCELLED
-    assert execution.termination_reason is TerminationReason.USER_REQUEST
-    assert execution.finish_time is not None
+    assert cancelled is operation
+    assert operation.state is ExecutionState.CANCELLED
+    assert operation.outcome is ExecutionOutcome.CANCELLED
+    assert operation.termination_reason is TerminationReason.USER_REQUEST
+    assert operation.finish_time is not None
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_CANCEL_REQUESTED,
@@ -246,57 +195,51 @@ def test_dispatcher_cancel_queued_operation_sets_execution_cancelled() -> None:
     ]
 
 
-def test_dispatcher_cancel_current_operation_sets_execution_cancelled() -> None:
+def test_dispatcher_cancel_current_operation_sets_cancelled_state() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
-    cancelled = dispatcher.cancel(scheduled_operation.id)
+    cancelled = dispatcher.cancel_operation(operation.id)
 
-    assert cancelled is scheduled_operation
-    assert dispatcher.current_scheduled_operation is None
-    execution = dispatcher.get_execution(scheduled_operation.id)
-    assert execution is not None
-    assert execution.state is ExecutionState.CANCELLED
+    assert cancelled is operation
+    assert dispatcher.current_operation is None
+    assert operation.state is ExecutionState.CANCELLED
 
 
-def test_dispatcher_fail_current_sets_failed_execution() -> None:
+def test_dispatcher_fail_operation_sets_failed_state() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
-    failed = dispatcher.fail_current()
+    failed = dispatcher.fail_operation(operation.id)
 
-    assert failed is scheduled_operation
-    execution = dispatcher.get_execution(scheduled_operation.id)
-    assert execution is not None
-    assert execution.state is ExecutionState.FAILED
-    assert execution.outcome is ExecutionOutcome.FAILURE
-    assert execution.termination_reason is TerminationReason.INTERNAL_ERROR
-    assert execution.finish_time is not None
+    assert failed is operation
+    assert operation.state is ExecutionState.FAILED
+    assert operation.outcome is ExecutionOutcome.FAILURE
+    assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
+    assert operation.finish_time is not None
 
 
-def test_dispatcher_run_once_waits_for_release_date() -> None:
+def test_dispatcher_step_dispatch_waits_for_release_date() -> None:
     future_release = datetime.now(timezone.utc) + timedelta(minutes=2)
-    scheduled_operation = _scheduled_operation(release_date=future_release)
+    operation = _operation(release_date=future_release)
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
+    dispatcher.add_operation(operation)
 
-    executed = asyncio.run(dispatcher.run_once())
+    executed = asyncio.run(dispatcher.step_dispatch())
 
     assert executed is None
-    assert dispatcher.current_scheduled_operation is None
-    execution = dispatcher.get_execution(scheduled_operation.id)
-    assert execution is not None
-    assert execution.state is ExecutionState.QUEUED
+    assert dispatcher.current_operation is None
+    assert operation.state is ExecutionState.QUEUED
 
 
 def test_dispatcher_get_state_reports_runtime_and_queue_information() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
     initial_state = dispatcher.get_state()
     assert isinstance(initial_state, OperationDispatcherState)
@@ -304,10 +247,10 @@ def test_dispatcher_get_state_reports_runtime_and_queue_information() -> None:
     assert initial_state.queue_size == 1
     assert initial_state.current_operation is None
 
-    dispatcher._start_next()
+    asyncio.run(dispatcher.step_dispatch())
     running_state = dispatcher.get_state()
     assert running_state.current_operation is not None
-    assert running_state.current_operation.id == scheduled_operation.id
+    assert running_state.current_operation.id == operation.id
 
 
 def test_dispatcher_emits_lifecycle_events() -> None:
@@ -320,11 +263,11 @@ def test_dispatcher_emits_lifecycle_events() -> None:
         resource_id="resource-a",
         on_notification_callback=notification_callback,
     )
-    scheduled_operation = _scheduled_operation()
+    operation = _operation()
 
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
-    dispatcher.complete_current()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
 
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
@@ -351,11 +294,15 @@ def test_dispatcher_records_runtime_lifecycle_events() -> None:
     assert DispatcherEventType.OPERATION_DISPATCHER_STOPPED in event_types
 
 
-def test_dispatcher_pause_current_emits_pause_requested_before_paused() -> None:
+def test_dispatcher_pause_current_operation_emits_pause_requested_before_paused() -> (
+    None
+):
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
+            return True
         if event.event_type is DispatcherEventType.OPERATION_PAUSE_REQUESTED:
             return True
         return None
@@ -365,26 +312,31 @@ def test_dispatcher_pause_current_emits_pause_requested_before_paused() -> None:
         on_request_callback=callback,
         on_notification_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
-    paused = dispatcher.pause_current_operation()
+    paused = dispatcher.pause_operation(operation.id)
     assert paused is True
 
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
+        DispatcherEventType.OPERATION_START_REQUESTED,
         DispatcherEventType.OPERATION_STARTED,
         DispatcherEventType.OPERATION_PAUSE_REQUESTED,
         DispatcherEventType.OPERATION_PAUSED,
     ]
 
 
-def test_dispatcher_resume_emits_resume_requested_when_current_exists() -> None:
+def test_dispatcher_resume_current_operation_emits_resume_requested_when_current_exists() -> (
+    None
+):
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
+            return True
         if event.event_type is DispatcherEventType.OPERATION_RESUME_REQUESTED:
             return True
         return None
@@ -394,18 +346,19 @@ def test_dispatcher_resume_emits_resume_requested_when_current_exists() -> None:
         on_request_callback=callback,
         on_notification_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
     dispatcher.pause_dispatcher_runtime()
     dispatcher.resume_dispatcher_runtime()
-    resume_accepted = dispatcher.resume_current_operation()
+    resume_accepted = dispatcher.resume_operation(operation.id)
 
     assert resume_accepted is True
 
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
+        DispatcherEventType.OPERATION_START_REQUESTED,
         DispatcherEventType.OPERATION_STARTED,
         DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
         DispatcherEventType.OPERATION_DISPATCHER_RESUMED,
@@ -426,13 +379,13 @@ def test_dispatcher_denies_start_when_callback_returns_none() -> None:
         on_request_callback=callback,
         on_notification_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    executed = asyncio.run(dispatcher.run_once())
+    executed = asyncio.run(dispatcher.step_dispatch())
 
     assert executed is None
-    assert dispatcher.current_scheduled_operation is None
+    assert dispatcher.current_operation is None
     assert DispatcherEventType.OPERATION_START_REQUESTED in seen_event_types
     assert DispatcherEventType.OPERATION_START_DENIED in seen_event_types
 
@@ -457,14 +410,14 @@ def test_dispatcher_retries_denied_start_after_cooldown() -> None:
         on_notification_callback=callback,
         start_request_retry_cooldown_seconds=0.02,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
     async def run_attempts() -> Operation | None:
-        first = await dispatcher.run_once()
-        second = await dispatcher.run_once()
+        first = await dispatcher.step_dispatch()
+        second = await dispatcher.step_dispatch()
         await asyncio.sleep(0.03)
-        third = await dispatcher.run_once()
+        third = await dispatcher.step_dispatch()
 
         assert first is None
         assert second is None
@@ -472,7 +425,7 @@ def test_dispatcher_retries_denied_start_after_cooldown() -> None:
 
     executed = asyncio.run(run_attempts())
 
-    assert executed is scheduled_operation
+    assert executed is operation
     assert start_request_calls == 2
     assert seen_event_types == [
         DispatcherEventType.OPERATION_ADDED,
@@ -499,16 +452,16 @@ def test_dispatcher_pauses_when_denied_start_reaches_max_retries() -> None:
         start_request_max_retries=2,
         start_request_retry_cooldown_seconds=0.0,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    first = asyncio.run(dispatcher.run_once())
-    second = asyncio.run(dispatcher.run_once())
+    first = asyncio.run(dispatcher.step_dispatch())
+    second = asyncio.run(dispatcher.step_dispatch())
 
     assert first is None
     assert second is None
     assert dispatcher.is_paused is True
-    assert dispatcher.current_scheduled_operation is None
+    assert dispatcher.current_operation is None
     assert seen_event_types == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_START_REQUESTED,
@@ -533,12 +486,12 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
         resource_id="resource-a",
         on_request_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    executed = asyncio.run(dispatcher.run_once())
+    executed = asyncio.run(dispatcher.step_dispatch())
 
-    assert executed is scheduled_operation
+    assert executed is operation
     request_events = [
         event
         for event in dispatcher.get_event_history()
@@ -546,108 +499,96 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
     ]
     assert len(request_events) == 1
     request_event = request_events[0]
-    assert request_event.event_type is DispatcherEventType.OPERATION_START_REQUESTED
-    assert request_event.payload["request_decision"]["accepted"] is True
-    assert request_event.payload["request_decision"]["reasoning"] == "policy_allowed"
-    assert request_event.payload["request_decision"]["data"] == {"rule": "start_ok"}
+    assert request_event.meta_data["request_decision"]["accepted"] is True
+    assert request_event.meta_data["request_decision"]["reasoning"] == "policy_allowed"
+    assert request_event.meta_data["request_decision"]["data"] == {"rule": "start_ok"}
 
 
-def test_dispatcher_history_entries_include_execution_and_events() -> None:
+def test_dispatcher_history_records_include_operation_and_events() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
-    dispatcher.complete_current()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
 
     history = dispatcher.get_history(limit=1)
 
-    assert isinstance(history, OperationHistory)
-    assert history.number_of_entries == 1
-    assert len(history.entries) == 1
-    history_entry = history.entries[0]
-    assert isinstance(history_entry, OperationHistoryEntry)
-    assert history_entry.scheduled_operation.id == scheduled_operation.id
-    assert len(history_entry.execution) == 1
-    assert history_entry.execution[0].state is ExecutionState.COMPLETED
+    assert isinstance(history, History)
+    assert history.num_records == 1
+    assert len(history.records) == 1
+    history_record = history.records[0]
+    assert isinstance(history_record, HistoryRecord)
+    assert history_record.operation.id == operation.id
+    assert history_record.operation.state is ExecutionState.COMPLETED
     assert any(
         event.event_type is DispatcherEventType.OPERATION_STARTED
-        for event in history_entry.events
+        for event in history_record.events
     )
     assert any(
         event.event_type is DispatcherEventType.OPERATION_COMPLETED
-        for event in history_entry.events
+        for event in history_record.events
     )
 
 
 def test_dispatcher_history_callback_can_merge_external_history() -> None:
-    callback_calls: list[tuple[int | None, OperationHistory]] = []
+    callback_calls: list[tuple[int | None, History]] = []
 
-    def history_callback(
-        limit: int | None,
-        in_memory_history: OperationHistory,
-    ) -> OperationHistory:
+    def history_callback(limit: int | None, in_memory_history: History) -> History:
         callback_calls.append((limit, in_memory_history))
 
-        external_entry = OperationHistoryEntry(
-            scheduled_operation=Operation(
+        external_record = HistoryRecord(
+            operation=Operation(
                 payload={"task": "external"},
                 resource_id="resource-a",
+                state=ExecutionState.COMPLETED,
+                outcome=ExecutionOutcome.SUCCESS,
+                start_time=datetime.now(timezone.utc),
             ),
-            execution=[
-                OperationExecution(
-                    operation_id=UUID(int=1),
-                    state=ExecutionState.COMPLETED,
-                    outcome=ExecutionOutcome.SUCCESS,
-                )
-            ],
             events=[],
         )
 
-        merged_entries = [external_entry, *in_memory_history.entries]
-        return OperationHistory(
-            number_of_entries=len(merged_entries),
-            entries=merged_entries,
+        merged_records = [external_record, *in_memory_history.records]
+        return History(
+            num_records=len(merged_records),
+            records=merged_records,
         )
 
     dispatcher = OperationDispatcher(
         resource_id="resource-a",
         on_history_callback=history_callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
-    dispatcher.complete_current()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
 
     history = dispatcher.get_history(limit=1)
 
     assert len(callback_calls) == 1
     callback_limit, callback_in_memory_history = callback_calls[0]
     assert callback_limit == 1
-    assert callback_in_memory_history.number_of_entries == 1
-    assert history.number_of_entries == 2
-    assert history.entries[0].scheduled_operation.payload["task"] == "external"
+    assert callback_in_memory_history.num_records == 1
+    assert history.num_records == 2
+    assert history.records[0].operation.payload["task"] == "external"
 
 
 def test_dispatcher_history_callback_none_falls_back_to_in_memory_history() -> None:
-    def history_callback(
-        limit: int | None,
-        in_memory_history: OperationHistory,
-    ) -> None:
+    def history_callback(limit: int | None, in_memory_history: History) -> None:
         return None
 
     dispatcher = OperationDispatcher(
         resource_id="resource-a",
         on_history_callback=history_callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
-    dispatcher.complete_current()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
 
     history = dispatcher.get_history(limit=1)
 
-    assert history.number_of_entries == 1
-    assert len(history.entries) == 1
+    assert history.num_records == 1
+    assert len(history.records) == 1
 
 
 def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
@@ -670,10 +611,10 @@ def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
         on_request_callback=callback,
         on_notification_callback=notification_callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
+    operation = _operation()
+    dispatcher.add_operation(operation)
 
-    executed = asyncio.run(dispatcher.run_once())
+    executed = asyncio.run(dispatcher.step_dispatch())
 
     assert executed is None
     denied_events = [
@@ -683,15 +624,19 @@ def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
     ]
     assert len(denied_events) == 1
     denied_event = denied_events[0]
-    assert denied_event.payload["reasoning"] == "resource_busy"
-    assert denied_event.payload["decision_data"] == {"resource_state": "busy"}
+    assert denied_event.meta_data["reasoning"] == "resource_busy"
+    assert denied_event.meta_data["decision_data"] == {"resource_state": "busy"}
 
 
-def test_dispatcher_does_not_pause_when_pause_request_denied() -> None:
+def test_dispatcher_does_not_pause_current_operation_when_pause_request_denied() -> (
+    None
+):
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
+            return True
         if event.event_type is DispatcherEventType.OPERATION_PAUSE_REQUESTED:
             return False
         return None
@@ -701,24 +646,28 @@ def test_dispatcher_does_not_pause_when_pause_request_denied() -> None:
         on_request_callback=callback,
         on_notification_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
-    paused = dispatcher.pause_current_operation()
+    paused = dispatcher.pause_operation(operation.id)
 
     assert paused is False
-    assert dispatcher.current_scheduled_operation is scheduled_operation
+    assert dispatcher.current_operation is operation
     assert DispatcherEventType.OPERATION_PAUSE_REQUESTED in seen_events
     assert DispatcherEventType.OPERATION_PAUSE_DENIED in seen_events
     assert DispatcherEventType.OPERATION_PAUSED not in seen_events
 
 
-def test_dispatcher_does_not_resume_when_resume_request_denied() -> None:
+def test_dispatcher_does_not_resume_current_operation_when_resume_request_denied() -> (
+    None
+):
     seen_events: list[DispatcherEventType] = []
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
+        if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
+            return True
         if event.event_type is DispatcherEventType.OPERATION_RESUME_REQUESTED:
             return False
         return None
@@ -728,13 +677,13 @@ def test_dispatcher_does_not_resume_when_resume_request_denied() -> None:
         on_request_callback=callback,
         on_notification_callback=callback,
     )
-    scheduled_operation = _scheduled_operation()
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
     dispatcher.pause_dispatcher_runtime()
 
     dispatcher.resume_dispatcher_runtime()
-    resume_accepted = dispatcher.resume_current_operation()
+    resume_accepted = dispatcher.resume_operation(operation.id)
 
     assert resume_accepted is False
     assert dispatcher.is_paused is False
@@ -742,3 +691,42 @@ def test_dispatcher_does_not_resume_when_resume_request_denied() -> None:
     assert DispatcherEventType.OPERATION_RESUME_DENIED in seen_events
     assert DispatcherEventType.OPERATION_DISPATCHER_RESUMED in seen_events
     assert DispatcherEventType.OPERATION_RESUMED not in seen_events
+
+
+def test_dispatcher_update_operation_emits_operation_updated_with_changes() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    operation = _operation(priority=1)
+    dispatcher.add_operation(operation)
+
+    updated = dispatcher.update_operation(operation.id, {"priority": 5})
+
+    assert updated is operation
+    assert updated is not None
+    assert updated.priority == 5
+
+    updated_events = [
+        event
+        for event in dispatcher.get_event_history()
+        if event.event_type is DispatcherEventType.OPERATION_UPDATED
+    ]
+    assert len(updated_events) == 1
+    assert any(change.field == "priority" for change in updated_events[0].changes)
+
+
+def test_dispatcher_update_operation_reorders_queue_when_priority_changes() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    higher_priority = _operation(priority=5)
+    lower_priority = _operation(priority=1)
+    dispatcher.add_operation(higher_priority)
+    dispatcher.add_operation(lower_priority)
+
+    schedule_before = dispatcher.get_schedule()
+    assert schedule_before[0] is higher_priority
+    assert schedule_before[1] is lower_priority
+
+    updated = dispatcher.update_operation(lower_priority.id, {"priority": 10})
+
+    assert updated is lower_priority
+    schedule_after = dispatcher.get_schedule()
+    assert schedule_after[0] is lower_priority
+    assert schedule_after[1] is higher_priority

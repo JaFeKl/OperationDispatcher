@@ -47,18 +47,16 @@ class VisualizedDispatcherDemo:
         if event.operation_id is None:
             return None
 
-        scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
-            event.operation_id
-        )
-        if scheduled_operation is None:
+        operation = self.operation_dispatcher.get_operation(event.operation_id)
+        if operation is None:
             return None
 
         if event.event_type is EventType.OPERATION_START_REQUESTED:
             if self._start_accept_delay_seconds > 0:
                 time.sleep(self._start_accept_delay_seconds)
             self._simulated_runner.start(
-                operation_id=scheduled_operation.id,
-                run_seconds=float(scheduled_operation.payload.get("run_seconds", 2.0)),
+                operation_id=operation.id,
+                run_seconds=float(operation.payload.get("run_seconds", 2.0)),
             )
             return True
         return None
@@ -67,9 +65,7 @@ class VisualizedDispatcherDemo:
         self.visualizer.on_notification(event)
 
     def _on_completed(self, operation_id: UUID) -> None:
-        current = self.operation_dispatcher.current_scheduled_operation
-        if current is not None and current.id == operation_id:
-            self.operation_dispatcher.complete_current()
+        self.operation_dispatcher.complete_operation(operation_id)
 
     async def run_demo(self) -> None:
         self._logger.info(f"Event visualizer running at {self.visualizer.url}")
@@ -77,14 +73,14 @@ class VisualizedDispatcherDemo:
         await asyncio.sleep(10.0)
         self._logger.info(f"Starting simulated demo operations...")
 
-        self.operation_dispatcher.add(
+        self.operation_dispatcher.add_operation(
             Operation(
                 payload={"name": "pickup", "run_seconds": 5.0},
                 resource_id="robot-1",
                 priority=10,
             )
         )
-        self.operation_dispatcher.add(
+        self.operation_dispatcher.add_operation(
             Operation(
                 payload={"name": "dropoff", "run_seconds": 5.0},
                 resource_id="robot-1",

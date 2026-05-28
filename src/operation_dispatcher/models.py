@@ -56,6 +56,7 @@ class EventType(str, Enum):
     OPERATION_RESUME_DENIED = "operation_resume_denied"
 
     OPERATION_ADDED = "operation_added"
+    OPERATION_UPDATED = "operation_updated"
     OPERATION_STARTED = "operation_started"
     OPERATION_COMPLETED = "operation_completed"
     OPERATION_FAILED = "operation_failed"
@@ -69,6 +70,12 @@ class DependencyType(str, Enum):
     START_TO_START = "START_TO_START"
 
 
+class ChangeRecord(BaseModel):
+    field: str
+    old_value: Any
+    new_value: Any
+
+
 class DispatchEvent(BaseModel):
     """
     A record of an event that occurred during the lifecycle of an operation,
@@ -76,11 +83,11 @@ class DispatchEvent(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    execution_id: UUID | None = None
     operation_id: UUID | None = None
     event_type: EventType
+    changes: list[ChangeRecord] = Field(default_factory=list)
+    meta_data: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def normalize_created_at(self) -> "DispatchEvent":
@@ -96,19 +103,35 @@ class Operation(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
+
+    # user payload describing the operation to be performed, e.g. command, parameters, etc.
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    # Scheduling
     resource_id: str
     priority: int = 0
     release_date: datetime | None = None
     planned_duration: int | None = None
     due_date: datetime | None = None
+    dependencies: list[UUID] = Field(default_factory=list)
+
+    # Runtime state
+    state: ExecutionState = ExecutionState.QUEUED
+    outcome: ExecutionOutcome = ExecutionOutcome.NONE
+    termination_reason: TerminationReason = TerminationReason.NONE
+    retry_count: int = 0
+    start_time: datetime | None = None
+    finish_time: datetime | None = None
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")
-    def validate_scheduled_operation(self) -> "Operation":
+    def validate_dates(self) -> "Operation":
         self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
         self.release_date = _normalize_to_utc(self.release_date)  # type: ignore[assignment]
         self.due_date = _normalize_to_utc(self.due_date)  # type: ignore[assignment]
+        self.start_time = _normalize_to_utc(self.start_time)  # type: ignore[assignment]
+        self.finish_time = _normalize_to_utc(self.finish_time)  # type: ignore[assignment]
 
         if self.planned_duration is not None and self.planned_duration <= 0:
             raise ValueError("planned_duration must be > 0")
@@ -118,25 +141,6 @@ class Operation(BaseModel):
             and self.due_date <= self.release_date
         ):
             raise ValueError("due_date must be after release_date")
-        return self
-
-
-class OperationExecution(BaseModel):
-    """
-    A record of the execution of an operation, including its current state, outcome, retry count, and timestamps.
-    """
-
-    id: UUID = Field(default_factory=uuid4)
-    operation_id: UUID
-    state: ExecutionState = ExecutionState.QUEUED
-    outcome: ExecutionOutcome = ExecutionOutcome.NONE
-    termination_reason: TerminationReason = TerminationReason.NONE
-    retry_count: int = 0
-    start_time: datetime | None = None
-    finish_time: datetime | None = None
-
-    @model_validator(mode="after")
-    def validate_execution(self) -> "OperationExecution":
         if (
             self.start_time is not None
             and self.finish_time is not None
@@ -145,7 +149,6 @@ class OperationExecution(BaseModel):
             raise ValueError("finish time must be after start time")
         if self.state == ExecutionState.RUNNING and self.start_time is None:
             raise ValueError("running operation requires actual_start_time")
-
         return self
 
 
@@ -170,25 +173,6 @@ class OperationDependency(BaseModel):
         return self
 
 
-class OperationHistoryEntry(BaseModel):
-    """
-    A record of an completed operation, including the operation details, its execution history, and any events that occurred during its lifecycle.
-    """
-
-    scheduled_operation: Operation
-    execution: list[OperationExecution]
-    events: list[DispatchEvent] = Field(default_factory=list)
-
-
-class OperationHistory(BaseModel):
-    """
-    A record of the history of operations.
-    """
-
-    number_of_entries: int = 0
-    entries: list[OperationHistoryEntry] = Field(default_factory=list)
-
-
 class OperationDispatcherState(BaseModel):
     """
     A record of the current state of the operation dispatcher, including whether it is running or paused, the size of the queue, and details about the currently running operation if applicable.
@@ -200,3 +184,21 @@ class OperationDispatcherState(BaseModel):
     current_operation: Operation | None = None
     running_since: datetime | None = None
     uptime_seconds: float | None = None
+
+
+class HistoryRecord(BaseModel):
+    """
+    A record of a completed operation, including its final state and outcome, as well as any events that occurred during its execution.
+    """
+
+    operation: Operation
+    events: list[DispatchEvent] = Field(default_factory=list)
+
+
+class History(BaseModel):
+    """
+    A record of completed operations, including their final state and outcome, as well as any events that occurred during their execution.
+    """
+
+    num_records: int = 0
+    records: list[HistoryRecord] = Field(default_factory=list)

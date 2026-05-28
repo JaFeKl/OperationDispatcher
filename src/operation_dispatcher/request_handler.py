@@ -33,7 +33,6 @@ class RequestHandler:
         request_event_timeout_seconds: float,
         append_event_history: Callable[[DispatchEvent], None],
         append_operation_event: Callable[[UUID, DispatchEvent], None],
-        get_execution_id: Callable[[UUID], UUID | None],
         emit_event: Callable[
             [
                 EventType,
@@ -51,7 +50,6 @@ class RequestHandler:
         self._request_event_timeout_seconds = request_event_timeout_seconds
         self._append_event_history = append_event_history
         self._append_operation_event = append_operation_event
-        self._get_execution_id = get_execution_id
         self._emit_event = emit_event
         self._log_event = log_event
         self._notify_wakeup = notify_wakeup
@@ -201,15 +199,9 @@ class RequestHandler:
         operation: Operation,
         event_type: EventType,
     ) -> RequestDecision:
-        execution_id = self._get_execution_id(operation.id)
-        if execution_id is None:
-            raise RuntimeError(f"missing execution state for operation {operation.id}")
-
         event = DispatchEvent(
-            execution_id=execution_id,
             operation_id=operation.id,
             event_type=event_type,
-            payload={},
         )
         self._append_event_history(event)
 
@@ -225,7 +217,7 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        event.payload = self._decision_event_payload(decision)
+        event.meta_data = self._decision_event_meta_data(decision)
         self._record_request_event(
             operation_id=operation.id,
             event=event,
@@ -241,15 +233,9 @@ class RequestHandler:
         operation: Operation,
         event_type: EventType,
     ) -> RequestDecision:
-        execution_id = self._get_execution_id(operation.id)
-        if execution_id is None:
-            raise RuntimeError(f"missing execution state for operation {operation.id}")
-
         event = DispatchEvent(
-            execution_id=execution_id,
             operation_id=operation.id,
             event_type=event_type,
-            payload={},
         )
         self._append_event_history(event)
 
@@ -265,7 +251,7 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        event.payload = self._decision_event_payload(decision)
+        event.meta_data = self._decision_event_meta_data(decision)
         self._record_request_event(
             operation_id=operation.id,
             event=event,
@@ -326,7 +312,7 @@ class RequestHandler:
         )
 
     @staticmethod
-    def _decision_event_payload(decision: RequestDecision) -> dict[str, Any]:
+    def _decision_event_meta_data(decision: RequestDecision) -> dict[str, Any]:
         return {
             "request_decision": {
                 "accepted": decision.accepted,

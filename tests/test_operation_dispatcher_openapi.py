@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 import time
 
@@ -11,7 +12,7 @@ from operation_dispatcher import (
 )
 
 
-def _scheduled_operation(
+def _operation(
     *,
     resource_id: str = "resource-a",
     priority: int = 0,
@@ -38,8 +39,8 @@ def test_openapi_add_single_operation_returns_operation_status() -> None:
 
     assert status == 201
     assert len(payload) == 1
-    assert payload[0]["scheduled_operation"]["payload"]["task"] == "single"
-    assert payload[0]["execution"]["state"] == ExecutionState.QUEUED.value
+    assert payload[0]["operation"]["payload"]["task"] == "single"
+    assert payload[0]["operation"]["state"] == ExecutionState.QUEUED.value
     assert payload[0]["is_current_operation"] is False
 
 
@@ -57,7 +58,7 @@ def test_openapi_add_operations_returns_operation_status_list() -> None:
     assert status == 201
     assert len(payload) == 2
     assert all(
-        item["execution"]["state"] == ExecutionState.QUEUED.value for item in payload
+        item["operation"]["state"] == ExecutionState.QUEUED.value for item in payload
     )
 
 
@@ -82,11 +83,11 @@ def test_openapi_list_operations_and_filter_by_state() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
-    first = _scheduled_operation(resource_id="resource-a", priority=5)
-    second = _scheduled_operation(resource_id="resource-a", priority=3)
-    dispatcher.add(first)
-    dispatcher.add(second)
-    dispatcher._start_next()
+    first = _operation(resource_id="resource-a", priority=5)
+    second = _operation(resource_id="resource-a", priority=3)
+    dispatcher.add_operation(first)
+    dispatcher.add_operation(second)
+    asyncio.run(dispatcher.step_dispatch())
 
     all_payload, all_status = dispatcher_api.list_operations_response(state=None)
     running_payload, running_status = dispatcher_api.list_operations_response(
@@ -97,26 +98,69 @@ def test_openapi_list_operations_and_filter_by_state() -> None:
     assert running_status == 200
     assert len(all_payload) == 2
     assert len(running_payload) == 1
-    assert running_payload[0]["execution"]["state"] == ExecutionState.RUNNING.value
+    assert running_payload[0]["operation"]["state"] == ExecutionState.RUNNING.value
     assert running_payload[0]["is_current_operation"] is True
+
+
+def test_openapi_list_operations_excludes_terminal_states_and_history_contains_them() -> (
+    None
+):
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    operation = _operation(resource_id="resource-a", priority=1)
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
+
+    listed_payload, listed_status = dispatcher_api.list_operations_response(state=None)
+    history_payload, history_status = dispatcher_api.get_operations_history_response(
+        limit=50
+    )
+
+    assert listed_status == 200
+    assert all(item["operation"]["id"] != str(operation.id) for item in listed_payload)
+
+    assert history_status == 200
+    assert any(
+        record["operation"]["id"] == str(operation.id)
+        for record in history_payload["records"]
+    )
+
+
+def test_openapi_list_operations_rejects_terminal_state_filter() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    payload, status = dispatcher_api.list_operations_response(
+        state=ExecutionState.COMPLETED.value
+    )
+
+    assert status == 400
+    assert payload["code"] == "invalid_state"
+    assert payload["details"]["valid_states"] == [
+        ExecutionState.PAUSED.value,
+        ExecutionState.QUEUED.value,
+        ExecutionState.RUNNING.value,
+    ]
 
 
 def test_openapi_get_operation_and_events() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
-    scheduled_operation = _scheduled_operation(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
 
     operation_payload, operation_status = dispatcher_api.get_operation_response(
-        str(scheduled_operation.id)
+        str(operation.id)
     )
     events_payload, events_status = dispatcher_api.get_operation_events_response(
-        str(scheduled_operation.id)
+        str(operation.id)
     )
 
     assert operation_status == 200
-    assert operation_payload["scheduled_operation"]["id"] == str(scheduled_operation.id)
-    assert operation_payload["execution"]["state"] == ExecutionState.QUEUED.value
+    assert operation_payload["operation"]["id"] == str(operation.id)
+    assert operation_payload["operation"]["state"] == ExecutionState.QUEUED.value
     assert events_status == 200
     assert len(events_payload) >= 1
 
@@ -129,14 +173,14 @@ def test_openapi_get_current_operation_requires_running_operation() -> None:
     assert missing_status == 404
     assert missing_payload["code"] == "no_running_operation"
 
-    scheduled_operation = _scheduled_operation(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
     current_payload, current_status = dispatcher_api.get_current_operation_response()
     assert current_status == 200
-    assert current_payload["scheduled_operation"]["id"] == str(scheduled_operation.id)
-    assert current_payload["execution"]["state"] == ExecutionState.RUNNING.value
+    assert current_payload["operation"]["id"] == str(operation.id)
+    assert current_payload["operation"]["state"] == ExecutionState.RUNNING.value
     assert current_payload["is_current_operation"] is True
 
 
@@ -144,27 +188,64 @@ def test_openapi_operation_pause_resume_cancel_commands() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
-    scheduled_operation = _scheduled_operation(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
     paused_payload, paused_status = dispatcher_api.pause_operation_response(
-        str(scheduled_operation.id)
+        str(operation.id)
     )
     assert paused_status == 200
-    assert paused_payload["execution"]["state"] == ExecutionState.PAUSED.value
+    assert paused_payload["operation"]["state"] == ExecutionState.PAUSED.value
 
     resumed_payload, resumed_status = dispatcher_api.resume_operation_response(
-        str(scheduled_operation.id)
+        str(operation.id)
     )
     assert resumed_status == 200
-    assert resumed_payload["execution"]["state"] == ExecutionState.RUNNING.value
+    assert resumed_payload["operation"]["state"] == ExecutionState.RUNNING.value
 
     cancelled_payload, cancelled_status = dispatcher_api.cancel_operation_response(
-        str(scheduled_operation.id)
+        str(operation.id)
     )
     assert cancelled_status == 200
-    assert cancelled_payload["execution"]["state"] == ExecutionState.CANCELLED.value
+    assert cancelled_payload["operation"]["state"] == ExecutionState.CANCELLED.value
+
+
+def test_openapi_update_operation_updates_fields() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    operation = _operation(resource_id="resource-a", priority=1)
+    dispatcher.add_operation(operation)
+
+    updated_payload, updated_status = dispatcher_api.update_operation_response(
+        str(operation.id),
+        {
+            "priority": 7,
+            "payload": {"task": "patched", "retries": 1},
+        },
+    )
+
+    assert updated_status == 200
+    assert updated_payload["operation"]["id"] == str(operation.id)
+    assert updated_payload["operation"]["priority"] == 7
+    assert updated_payload["operation"]["payload"]["task"] == "patched"
+
+
+def test_openapi_update_operation_rejects_invalid_update_payload_type() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+
+    payload, status = dispatcher_api.update_operation_response(
+        str(operation.id),
+        ["not", "a", "dict"],
+    )
+
+    assert status == 400
+    assert payload["code"] == "invalid_updates"
 
 
 def test_openapi_dispatcher_runtime_endpoints() -> None:
@@ -193,9 +274,9 @@ def test_openapi_dispatcher_pause_resume_do_not_trigger_operation_requests() -> 
     dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
 
-    scheduled_operation = _scheduled_operation(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
-    dispatcher._start_next()
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
 
     pause_payload, pause_status = dispatcher_api.pause_operation_dispatcher_response()
     assert pause_status == 200
@@ -222,11 +303,11 @@ def test_openapi_dispatcher_stop_does_not_trigger_operation_cancel_request() -> 
     assert start_status == 202
     assert "state" in start_payload
 
-    scheduled_operation = _scheduled_operation(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
 
     deadline = time.time() + 0.5
-    while dispatcher.current_scheduled_operation is None and time.time() < deadline:
+    while dispatcher.current_operation is None and time.time() < deadline:
         time.sleep(0.01)
 
     stop_payload, stop_status = dispatcher_api.stop_operation_dispatcher_response()
@@ -256,6 +337,15 @@ def test_openapi_register_default_endpoints_exposes_new_contract_routes() -> Non
     assert client.get("/operations/current").status_code == 404
     assert client.get("/operations/history").status_code == 200
     assert client.post("/operations/add", json={}).status_code == 400
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    assert (
+        client.post(
+            f"/operations/{operation.id}/update",
+            json={"priority": 4},
+        ).status_code
+        == 200
+    )
     assert client.post("/operations", json=[]).status_code == 405
     assert client.post("/operations:batch", json=[]).status_code == 404
     assert client.get("/dispatcher").status_code == 200
@@ -277,16 +367,16 @@ def test_openapi_cancel_endpoint_accepts_path_operation_id_kwarg() -> None:
     dispatcher_api.register_default_endpoints(app)
     client = app.test_client()
 
-    scheduled_operation = _scheduled_operation(resource_id="resource-a")
-    dispatcher.add(scheduled_operation)
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
 
-    response = client.post(f"/operations/{scheduled_operation.id}/cancel")
+    response = client.post(f"/operations/{operation.id}/cancel")
 
     assert response.status_code == 200
     response_payload = response.get_json()
     assert response_payload is not None
-    assert response_payload["scheduled_operation"]["id"] == str(scheduled_operation.id)
-    assert response_payload["execution"]["state"] == ExecutionState.CANCELLED.value
+    assert response_payload["operation"]["id"] == str(operation.id)
+    assert response_payload["operation"]["state"] == ExecutionState.CANCELLED.value
 
 
 def test_openapi_definitions_include_operation_status_model() -> None:
@@ -296,10 +386,11 @@ def test_openapi_definitions_include_operation_status_model() -> None:
 
     assert "OperationStatus" in definitions
     assert "Operation" in definitions
-    assert "OperationExecution" in definitions
+    assert "DispatchEvent" in definitions
     assert "AddOperationItem" in definitions
+    assert "UpdateOperationItem" in definitions
     assert (
-        definitions["OperationStatus"]["properties"]["scheduled_operation"]["$ref"]
+        definitions["OperationStatus"]["properties"]["operation"]["$ref"]
         == "#/definitions/Operation"
     )
 

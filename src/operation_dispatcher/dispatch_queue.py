@@ -87,6 +87,9 @@ class DispatchQueue:
         self._queue.append(operation)
         self._sort_operations()
 
+    def resort(self) -> None:
+        self._sort_operations()
+
     def get(self, operation_id: UUID) -> Operation | None:
         """
         Get an operation by ID from the schedule, including pending, pulled and completed operations.

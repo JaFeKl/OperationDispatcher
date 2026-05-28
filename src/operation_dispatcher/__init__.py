@@ -4,20 +4,29 @@ from .models import (
     EventType,
     ExecutionState,
     ExecutionOutcome,
+    History,
+    HistoryRecord,
     OperationDependency,
-    OperationHistory,
-    OperationHistoryEntry,
-    OperationExecution,
     OperationDispatcherState,
     Operation,
     TerminationReason,
 )
 from .dispatch_queue import DispatchQueue, SortDirection, SortField, SortRule
-from .operation_dispatcher import OperationDispatcher
-from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
+from .operation_dispatcher import OperationDispatcher, OperationDispatcherReference
 from .runtime_controller import OperationDispatcherRuntimeController
+from .services import (
+    DispatcherHistoryService,
+    DispatcherRuntimeService,
+    DispatcherStateStore,
+    OperationLifecycleService,
+)
 from .utils.simulated_operation_runner import SimulatedOperationRunner
 from .visualization import BrowserEventVisualizer
+
+try:
+    from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
+except ImportError:
+    pass
 
 try:
     from .operation_dispatcher_mcp import (
@@ -34,13 +43,16 @@ _OPTIONAL_MCP_EXPORTS = {
     "create_operation_dispatcher_mcp_server",
 }
 
+_OPTIONAL_OPENAPI_EXPORTS = {
+    "OperationDispatcherOpenAPI",
+}
+
 __all__ = [
     "DependencyType",
     "Operation",
     "OperationDependency",
-    "OperationHistory",
-    "OperationHistoryEntry",
-    "OperationExecution",
+    "History",
+    "HistoryRecord",
     "ExecutionState",
     "ExecutionOutcome",
     "TerminationReason",
@@ -52,11 +64,18 @@ __all__ = [
     "SortDirection",
     "SortRule",
     "OperationDispatcher",
-    "OperationDispatcherOpenAPI",
+    "OperationDispatcherReference",
     "OperationDispatcherRuntimeController",
+    "DispatcherStateStore",
+    "DispatcherRuntimeService",
+    "OperationLifecycleService",
+    "DispatcherHistoryService",
     "SimulatedOperationRunner",
     "BrowserEventVisualizer",
 ]
+
+if "OperationDispatcherOpenAPI" in globals():
+    __all__.append("OperationDispatcherOpenAPI")
 
 if "OperationDispatcherMCPServer" in globals():
     __all__.extend(
@@ -73,5 +92,10 @@ def __getattr__(name: str):
         raise ImportError(
             "MCP support is optional. Install with `operation-dispatcher[mcp]` "
             "to use MCP exports."
+        )
+    if name in _OPTIONAL_OPENAPI_EXPORTS:
+        raise ImportError(
+            "OpenAPI support requires API dependencies. Install with "
+            "`operation-dispatcher[api]` to use OpenAPI exports."
         )
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

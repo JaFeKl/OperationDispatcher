@@ -128,26 +128,24 @@ class BrowserEventVisualizer:
     ) -> None:
         event_details = {
             "id": str(event.id),
-            "execution_id": (
-                str(event.execution_id) if event.execution_id is not None else None
-            ),
             "operation_id": (
                 str(event.operation_id) if event.operation_id is not None else None
             ),
             "event_type": event.event_type.name,
             "event_type_value": event.event_type.value,
             "created_at": event.created_at.isoformat(),
-            "payload": event.payload,
+            "changes": [change.model_dump(mode="json") for change in event.changes],
+            "meta_data": event.meta_data,
         }
-        execution_details, operation_details = self._resolve_related_details(event)
+        operation_details = self._resolve_related_details(event)
 
         self.publish_event(
             event_type=event.event_type.name,
             operation_id=event.operation_id,
             source=source,
-            payload=event.payload,
+            meta_data=event.meta_data,
+            changes=[change.model_dump(mode="json") for change in event.changes],
             event_details=event_details,
-            execution_details=execution_details,
             operation_details=operation_details,
         )
 
@@ -156,9 +154,9 @@ class BrowserEventVisualizer:
         event_type: str,
         operation_id: UUID | str | None = None,
         source: str = "custom",
-        payload: dict[str, Any] | None = None,
+        meta_data: dict[str, Any] | None = None,
+        changes: list[dict[str, Any]] | None = None,
         event_details: dict[str, Any] | None = None,
-        execution_details: dict[str, Any] | None = None,
         operation_details: dict[str, Any] | None = None,
     ) -> None:
         message = {
@@ -168,9 +166,9 @@ class BrowserEventVisualizer:
             "operation_id": (
                 str(operation_id) if isinstance(operation_id, UUID) else operation_id
             ),
-            "payload": payload or {},
+            "meta_data": meta_data or {},
+            "changes": changes or [],
             "event_details": event_details,
-            "execution_details": execution_details,
             "operation_details": operation_details,
         }
 
@@ -193,38 +191,28 @@ class BrowserEventVisualizer:
     def _resolve_related_details(
         self,
         event: DispatchEvent,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    ) -> dict[str, Any] | None:
         operation_dispatcher = self._operation_dispatcher
         if operation_dispatcher is None:
-            return None, None
+            return None
 
         operation_id = event.operation_id
         if operation_id is None:
-            return None, None
+            return None
 
-        scheduled_operation = operation_dispatcher.get_scheduled_operation(operation_id)
-        execution = operation_dispatcher.get_execution(operation_id)
-
-        if scheduled_operation is None or execution is None:
+        operation = operation_dispatcher.get_operation(operation_id)
+        if operation is None:
             history = operation_dispatcher.get_history(limit=self._max_events)
-            for history_entry in history.entries:
-                if history_entry.scheduled_operation.id != operation_id:
+            for history_record in history.records:
+                if history_record.operation.id != operation_id:
                     continue
-                if scheduled_operation is None:
-                    scheduled_operation = history_entry.scheduled_operation
-                if execution is None and len(history_entry.execution) > 0:
-                    execution = history_entry.execution[-1]
+                operation = history_record.operation
                 break
 
-        execution_details = (
-            execution.model_dump(mode="json") if execution is not None else None
-        )
-        operation_details = (
-            scheduled_operation.model_dump(mode="json")
-            if scheduled_operation is not None
-            else None
-        )
-        return execution_details, operation_details
+        if operation is None:
+            return None
+
+        return operation.model_dump(mode="json")
 
     def _get_history(self) -> list[dict[str, Any]]:
         with self._events_lock:
@@ -468,8 +456,8 @@ _INDEX_HTML = """<!doctype html>
       };
 
       function eventKey(event) {
-        const payload = event.payload || {};
-        const id = payload.id || '';
+        const details = event.event_details || {};
+        const id = details.id || '';
         return `${id}|${event.timestamp}|${event.event_type}|${event.source}|${event.operation_id || ''}`;
       }
 
@@ -494,8 +482,10 @@ _INDEX_HTML = """<!doctype html>
         const sourceClass = colorClassBySource[event.source] || 'source-custom';
         const operationId = event.operation_id || '';
         const hasOperationContext = operationId !== '';
-        const eventDetails = event.event_details || event.payload || {};
-        const executionDetails = event.execution_details || null;
+        const eventDetails = event.event_details || {
+          meta_data: event.meta_data || {},
+          changes: event.changes || [],
+        };
         const operationDetails = event.operation_details || null;
 
         function detailsBlock(title, data) {
@@ -508,9 +498,6 @@ _INDEX_HTML = """<!doctype html>
         }
 
         let detailsHtml = detailsBlock('Show event details', eventDetails);
-        if (hasOperationContext && executionDetails !== null) {
-          detailsHtml += detailsBlock('Show execution details', executionDetails);
-        }
         if (hasOperationContext && operationDetails !== null) {
           detailsHtml += detailsBlock('Show operation details', operationDetails);
         }
