@@ -9,6 +9,7 @@ from operation_dispatcher import (
     OperationDispatcher,
     OperationDispatcherOpenAPI,
     Operation,
+    TerminationReason,
 )
 
 
@@ -211,6 +212,143 @@ def test_openapi_operation_pause_resume_cancel_commands() -> None:
     assert cancelled_payload["operation"]["state"] == ExecutionState.CANCELLED.value
 
 
+def test_openapi_operation_cancel_accepts_optional_meta_data_and_termination_reason() -> (
+    None
+):
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+
+    cancelled_payload, cancelled_status = dispatcher_api.cancel_operation_response(
+        str(operation.id),
+        command_payload={
+            "meta_data": {"source": "openapi", "ticket": "T-42"},
+            "termination_reason": TerminationReason.USER_REQUEST.value,
+        },
+    )
+
+    assert cancelled_status == 200
+    assert cancelled_payload["operation"]["state"] == ExecutionState.CANCELLED.value
+    assert (
+        cancelled_payload["operation"]["termination_reason"]
+        == TerminationReason.USER_REQUEST.value
+    )
+
+    operation_events_payload, operation_events_status = (
+        dispatcher_api.get_operation_events_response(str(operation.id))
+    )
+    assert operation_events_status == 200
+
+    cancel_requested_events = [
+        event
+        for event in operation_events_payload
+        if event["event_type"] == "operation_cancel_requested"
+    ]
+    cancelled_events = [
+        event
+        for event in operation_events_payload
+        if event["event_type"] == "operation_cancelled"
+    ]
+    assert len(cancel_requested_events) == 1
+    assert len(cancelled_events) == 1
+    assert cancel_requested_events[0]["meta_data"]["source"] == "openapi"
+    assert cancelled_events[0]["meta_data"] == {
+        "source": "openapi",
+        "ticket": "T-42",
+    }
+
+
+def test_openapi_operation_pause_resume_accept_optional_meta_data() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+
+    paused_payload, paused_status = dispatcher_api.pause_operation_response(
+        str(operation.id),
+        command_payload={"meta_data": {"source": "openapi", "action": "pause"}},
+    )
+    assert paused_status == 200
+    assert paused_payload["operation"]["state"] == ExecutionState.PAUSED.value
+
+    resumed_payload, resumed_status = dispatcher_api.resume_operation_response(
+        str(operation.id),
+        command_payload={"meta_data": {"source": "openapi", "action": "resume"}},
+    )
+    assert resumed_status == 200
+    assert resumed_payload["operation"]["state"] == ExecutionState.RUNNING.value
+
+    operation_events_payload, operation_events_status = (
+        dispatcher_api.get_operation_events_response(str(operation.id))
+    )
+    assert operation_events_status == 200
+
+    pause_requested_events = [
+        event
+        for event in operation_events_payload
+        if event["event_type"] == "operation_pause_requested"
+    ]
+    pause_events = [
+        event
+        for event in operation_events_payload
+        if event["event_type"] == "operation_paused"
+    ]
+    resume_requested_events = [
+        event
+        for event in operation_events_payload
+        if event["event_type"] == "operation_resume_requested"
+    ]
+    resume_events = [
+        event
+        for event in operation_events_payload
+        if event["event_type"] == "operation_resumed"
+    ]
+
+    assert pause_requested_events[0]["meta_data"]["source"] == "openapi"
+    assert pause_events[0]["meta_data"] == {"source": "openapi", "action": "pause"}
+    assert resume_requested_events[0]["meta_data"]["source"] == "openapi"
+    assert resume_events[0]["meta_data"] == {
+        "source": "openapi",
+        "action": "resume",
+    }
+
+
+def test_openapi_cancel_operation_rejects_invalid_optional_command_payload() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+
+    payload, status = dispatcher_api.cancel_operation_response(
+        str(operation.id),
+        command_payload={"termination_reason": "NOT_A_REASON"},
+    )
+
+    assert status == 400
+    assert payload["code"] == "invalid_termination_reason"
+
+
+def test_openapi_pause_operation_rejects_invalid_meta_data() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+    operation = _operation(resource_id="resource-a")
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+
+    payload, status = dispatcher_api.pause_operation_response(
+        str(operation.id),
+        command_payload={"meta_data": "invalid"},
+    )
+
+    assert status == 400
+    assert payload["code"] == "invalid_meta_data"
+
+
 def test_openapi_update_operation_updates_fields() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
     dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
@@ -389,10 +527,39 @@ def test_openapi_definitions_include_operation_status_model() -> None:
     assert "DispatchEvent" in definitions
     assert "AddOperationItem" in definitions
     assert "UpdateOperationItem" in definitions
+    assert "LifecycleCommand" in definitions
+    assert "CancelOperationCommand" in definitions
+    assert definitions["LifecycleCommand"]["properties"]["meta_data"]["default"] == {}
+    assert (
+        definitions["CancelOperationCommand"]["properties"]["meta_data"]["default"]
+        == {}
+    )
     assert (
         definitions["OperationStatus"]["properties"]["operation"]["$ref"]
         == "#/definitions/Operation"
     )
+
+
+def test_openapi_payload_schema_uses_default_payload_example() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    default_payload = {
+        "name": "default_operation",
+        "task": "default_task",
+        "run_seconds": 5.0,
+    }
+    dispatcher_api = OperationDispatcherOpenAPI(
+        dispatcher,
+        default_operation_payload=default_payload,
+    )
+    definitions = dispatcher_api.get_openapi_definitions()
+
+    add_payload_schema = definitions["AddOperationItem"]["properties"]["payload"]
+    operation_payload_schema = definitions["Operation"]["properties"]["payload"]
+
+    assert add_payload_schema["type"] == "object"
+    assert add_payload_schema["example"] == default_payload
+    assert operation_payload_schema["type"] == "object"
+    assert operation_payload_schema["example"] == default_payload
 
 
 def test_openapi_get_operation_reports_not_found() -> None:

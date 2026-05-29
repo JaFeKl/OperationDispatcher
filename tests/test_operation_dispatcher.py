@@ -186,7 +186,7 @@ def test_dispatcher_cancel_queued_operation_sets_cancelled_state() -> None:
     assert cancelled is operation
     assert operation.state is ExecutionState.CANCELLED
     assert operation.outcome is ExecutionOutcome.CANCELLED
-    assert operation.termination_reason is TerminationReason.USER_REQUEST
+    assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
     assert operation.finish_time is not None
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
@@ -221,6 +221,82 @@ def test_dispatcher_fail_operation_sets_failed_state() -> None:
     assert operation.outcome is ExecutionOutcome.FAILURE
     assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
     assert operation.finish_time is not None
+
+
+def test_dispatcher_cancel_operation_accepts_termination_reason_override() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    operation = _operation()
+    dispatcher.add_operation(operation)
+
+    cancelled = dispatcher.cancel_operation(
+        operation.id,
+        termination_reason=TerminationReason.USER_REQUEST,
+    )
+
+    assert cancelled is operation
+    assert operation.state is ExecutionState.CANCELLED
+    assert operation.outcome is ExecutionOutcome.CANCELLED
+    assert operation.termination_reason is TerminationReason.USER_REQUEST
+
+
+def test_dispatcher_fail_operation_accepts_termination_reason_override() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+
+    failed = dispatcher.fail_operation(
+        operation.id,
+        termination_reason=TerminationReason.EXTERNAL_ERROR,
+    )
+
+    assert failed is operation
+    assert operation.state is ExecutionState.FAILED
+    assert operation.outcome is ExecutionOutcome.FAILURE
+    assert operation.termination_reason is TerminationReason.EXTERNAL_ERROR
+
+
+def test_dispatcher_lifecycle_methods_propagate_meta_data_to_events() -> None:
+    def callback(event) -> bool | None:
+        if event.event_type is DispatcherEventType.OPERATION_CANCEL_REQUESTED:
+            return True
+        return None
+
+    dispatcher = OperationDispatcher(
+        resource_id="resource-a",
+        on_request_callback=callback,
+    )
+    operation = _operation()
+    add_meta = {"source": "api", "trace_id": "op-123"}
+    update_meta = {"source": "api", "action": "update"}
+    cancel_meta = {"source": "api", "action": "cancel", "reason": "manual"}
+
+    dispatcher.add_operation(operation, meta_data=add_meta)
+    dispatcher.update_operation(
+        operation.id,
+        {"priority": 9},
+        meta_data=update_meta,
+    )
+    dispatcher.cancel_operation(operation.id, meta_data=cancel_meta)
+
+    event_by_type = {
+        event.event_type: event for event in dispatcher.get_event_history()
+    }
+
+    assert event_by_type[DispatcherEventType.OPERATION_ADDED].meta_data == add_meta
+    assert event_by_type[DispatcherEventType.OPERATION_UPDATED].meta_data == update_meta
+
+    cancel_requested_event = event_by_type[
+        DispatcherEventType.OPERATION_CANCEL_REQUESTED
+    ]
+    assert cancel_requested_event.meta_data["source"] == "api"
+    assert cancel_requested_event.meta_data["action"] == "cancel"
+    assert cancel_requested_event.meta_data["reason"] == "manual"
+    assert cancel_requested_event.meta_data["request_decision"]["accepted"] is True
+
+    assert (
+        event_by_type[DispatcherEventType.OPERATION_CANCELLED].meta_data == cancel_meta
+    )
 
 
 def test_dispatcher_step_dispatch_waits_for_release_date() -> None:

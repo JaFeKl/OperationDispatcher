@@ -40,15 +40,21 @@ class OperationLifecycleService:
         self,
         operation: Operation,
         apply_default_planned_duration: bool = True,
+        meta_data: dict[str, Any] | None = None,
     ) -> None:
         self._mutation_service.execute(
-            lambda: self._add_internal(operation, apply_default_planned_duration)
+            lambda: self._add_internal(
+                operation,
+                apply_default_planned_duration,
+                meta_data=meta_data,
+            )
         )
 
     def _add_internal(
         self,
         operation: Operation,
         apply_default_planned_duration: bool,
+        meta_data: dict[str, Any] | None,
     ) -> None:
         if (
             apply_default_planned_duration
@@ -62,6 +68,7 @@ class OperationLifecycleService:
         self._event_service.emit_event(
             EventType.OPERATION_ADDED,
             operation=operation,
+            meta_data=meta_data,
         )
 
     def get_schedule(self) -> list[Operation]:
@@ -70,12 +77,23 @@ class OperationLifecycleService:
     def get_operation(self, operation_id: UUID) -> Operation | None:
         return self._state_store.dispatch_queue.get(operation_id)
 
-    def complete_operation(self, operation_id: UUID) -> Operation:
+    def complete_operation(
+        self,
+        operation_id: UUID,
+        meta_data: dict[str, Any] | None = None,
+    ) -> Operation:
         return self._mutation_service.execute(
-            lambda: self._complete_operation_internal(operation_id)
+            lambda: self._complete_operation_internal(
+                operation_id,
+                meta_data=meta_data,
+            )
         )
 
-    def _complete_operation_internal(self, operation_id: UUID) -> Operation:
+    def _complete_operation_internal(
+        self,
+        operation_id: UUID,
+        meta_data: dict[str, Any] | None,
+    ) -> Operation:
         operation = self._require_current_operation(operation_id)
         old_operation = operation.model_copy(deep=True)
         self._transition_operation_state(
@@ -89,29 +107,45 @@ class OperationLifecycleService:
         self._event_service.emit_event(
             EventType.OPERATION_COMPLETED,
             operation=operation,
+            meta_data=meta_data,
             old_operation=old_operation,
         )
         return operation
 
-    def fail_operation(self, operation_id: UUID) -> Operation:
+    def fail_operation(
+        self,
+        operation_id: UUID,
+        termination_reason: TerminationReason = TerminationReason.INTERNAL_ERROR,
+        meta_data: dict[str, Any] | None = None,
+    ) -> Operation:
         return self._mutation_service.execute(
-            lambda: self._fail_operation_internal(operation_id)
+            lambda: self._fail_operation_internal(
+                operation_id,
+                termination_reason=termination_reason,
+                meta_data=meta_data,
+            )
         )
 
-    def _fail_operation_internal(self, operation_id: UUID) -> Operation:
+    def _fail_operation_internal(
+        self,
+        operation_id: UUID,
+        termination_reason: TerminationReason,
+        meta_data: dict[str, Any] | None,
+    ) -> Operation:
         operation = self._require_current_operation(operation_id)
         old_operation = operation.model_copy(deep=True)
         self._transition_operation_state(
             operation,
             state=ExecutionState.FAILED,
             outcome=ExecutionOutcome.FAILURE,
-            termination_reason=TerminationReason.INTERNAL_ERROR,
+            termination_reason=termination_reason,
             set_finish_time=True,
         )
         self._state_store.dispatch_queue.complete(operation)
         self._event_service.emit_event(
             EventType.OPERATION_FAILED,
             operation=operation,
+            meta_data=meta_data,
             old_operation=old_operation,
         )
         return operation
@@ -120,15 +154,21 @@ class OperationLifecycleService:
         self,
         operation_id: UUID,
         enforce_running_state: bool = True,
+        meta_data: dict[str, Any] | None = None,
     ) -> bool:
         return self._mutation_service.execute(
-            lambda: self._pause_operation_internal(operation_id, enforce_running_state)
+            lambda: self._pause_operation_internal(
+                operation_id,
+                enforce_running_state,
+                meta_data=meta_data,
+            )
         )
 
     def _pause_operation_internal(
         self,
         operation_id: UUID,
         enforce_running_state: bool,
+        meta_data: dict[str, Any] | None,
     ) -> bool:
         operation = self._require_current_operation(operation_id)
         if enforce_running_state and operation.state is not ExecutionState.RUNNING:
@@ -141,6 +181,7 @@ class OperationLifecycleService:
         if not request_handler.request_operation_with_retry_sync(
             operation,
             EventType.OPERATION_PAUSE_REQUESTED,
+            meta_data=meta_data,
         ):
             return False
 
@@ -149,6 +190,7 @@ class OperationLifecycleService:
         self._event_service.emit_event(
             EventType.OPERATION_PAUSED,
             operation=operation,
+            meta_data=meta_data,
             old_operation=old_operation,
         )
         return True
@@ -157,15 +199,21 @@ class OperationLifecycleService:
         self,
         operation_id: UUID,
         enforce_paused_state: bool = True,
+        meta_data: dict[str, Any] | None = None,
     ) -> bool:
         return self._mutation_service.execute(
-            lambda: self._resume_operation_internal(operation_id, enforce_paused_state)
+            lambda: self._resume_operation_internal(
+                operation_id,
+                enforce_paused_state,
+                meta_data=meta_data,
+            )
         )
 
     def _resume_operation_internal(
         self,
         operation_id: UUID,
         enforce_paused_state: bool,
+        meta_data: dict[str, Any] | None,
     ) -> bool:
         operation = self._require_current_operation(operation_id)
         if enforce_paused_state and operation.state is not ExecutionState.PAUSED:
@@ -178,6 +226,7 @@ class OperationLifecycleService:
         accepted = request_handler.request_operation_with_retry_sync(
             operation,
             EventType.OPERATION_RESUME_REQUESTED,
+            meta_data=meta_data,
         )
         if not accepted:
             return False
@@ -187,16 +236,31 @@ class OperationLifecycleService:
         self._event_service.emit_event(
             EventType.OPERATION_RESUMED,
             operation=operation,
+            meta_data=meta_data,
             old_operation=old_operation,
         )
         return True
 
-    def cancel(self, operation_id: UUID) -> Operation | None:
+    def cancel(
+        self,
+        operation_id: UUID,
+        termination_reason: TerminationReason = TerminationReason.INTERNAL_ERROR,
+        meta_data: dict[str, Any] | None = None,
+    ) -> Operation | None:
         return self._mutation_service.execute(
-            lambda: self._cancel_internal(operation_id)
+            lambda: self._cancel_internal(
+                operation_id,
+                termination_reason=termination_reason,
+                meta_data=meta_data,
+            )
         )
 
-    def _cancel_internal(self, operation_id: UUID) -> Operation | None:
+    def _cancel_internal(
+        self,
+        operation_id: UUID,
+        termination_reason: TerminationReason,
+        meta_data: dict[str, Any] | None,
+    ) -> Operation | None:
         operation = self.get_operation(operation_id)
         if operation is None:
             return None
@@ -208,6 +272,7 @@ class OperationLifecycleService:
         if not request_handler.request_operation_with_retry_sync(
             operation,
             EventType.OPERATION_CANCEL_REQUESTED,
+            meta_data=meta_data,
         ):
             return None
 
@@ -220,7 +285,7 @@ class OperationLifecycleService:
             cancelled_operation,
             state=ExecutionState.CANCELLED,
             outcome=ExecutionOutcome.CANCELLED,
-            termination_reason=TerminationReason.USER_REQUEST,
+            termination_reason=termination_reason,
             set_finish_time=True,
         )
 
@@ -228,19 +293,30 @@ class OperationLifecycleService:
         self._event_service.emit_event(
             EventType.OPERATION_CANCELLED,
             operation=cancelled_operation,
+            meta_data=meta_data,
             old_operation=old_operation,
         )
         return cancelled_operation
 
-    def update(self, operation_id: UUID, updates: dict[str, Any]) -> Operation | None:
+    def update(
+        self,
+        operation_id: UUID,
+        updates: dict[str, Any],
+        meta_data: dict[str, Any] | None = None,
+    ) -> Operation | None:
         return self._mutation_service.execute(
-            lambda: self._update_internal(operation_id, updates)
+            lambda: self._update_internal(
+                operation_id,
+                updates,
+                meta_data=meta_data,
+            )
         )
 
     def _update_internal(
         self,
         operation_id: UUID,
         updates: dict[str, Any],
+        meta_data: dict[str, Any] | None,
     ) -> Operation | None:
         operation = self.get_operation(operation_id)
         if operation is None:
@@ -275,6 +351,7 @@ class OperationLifecycleService:
             self._event_service.emit_event(
                 EventType.OPERATION_UPDATED,
                 operation=operation,
+                meta_data=meta_data,
                 old_operation=old_operation,
             )
 

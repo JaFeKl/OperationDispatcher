@@ -59,6 +59,7 @@ class RequestHandler:
         return await self.request_operation_with_retry(
             operation,
             EventType.OPERATION_START_REQUESTED,
+            meta_data=None,
         )
 
     def has_request_cooldown(self, operation: Operation) -> bool:
@@ -105,13 +106,18 @@ class RequestHandler:
         self,
         operation: Operation,
         event_type: EventType,
+        meta_data: dict[str, Any] | None = None,
     ) -> bool:
         now = datetime.now(timezone.utc)
         retry_key = self._request_retry_key(operation.id, event_type)
         if self._request_retry_policy.is_cooldown_active(retry_key, now):
             return False
 
-        decision = self._request_operation_event_sync(operation, event_type)
+        decision = self._request_operation_event_sync(
+            operation,
+            event_type,
+            meta_data=meta_data,
+        )
         if decision.accepted:
             self._request_retry_policy.clear(retry_key)
             return True
@@ -128,6 +134,8 @@ class RequestHandler:
                 denied_metadata["reasoning"] = decision.reasoning
             if decision.data:
                 denied_metadata["decision_data"] = decision.data
+            if meta_data:
+                denied_metadata["request_meta_data"] = dict(meta_data)
             self._emit_event(
                 denied_event_type,
                 operation,
@@ -142,13 +150,18 @@ class RequestHandler:
         self,
         operation: Operation,
         event_type: EventType,
+        meta_data: dict[str, Any] | None = None,
     ) -> bool:
         now = datetime.now(timezone.utc)
         retry_key = self._request_retry_key(operation.id, event_type)
         if self._request_retry_policy.is_cooldown_active(retry_key, now):
             return False
 
-        decision = await self._request_operation_event(operation, event_type)
+        decision = await self._request_operation_event(
+            operation,
+            event_type,
+            meta_data=meta_data,
+        )
         if decision.accepted:
             self._request_retry_policy.clear(retry_key)
             return True
@@ -165,6 +178,8 @@ class RequestHandler:
                 denied_metadata["reasoning"] = decision.reasoning
             if decision.data:
                 denied_metadata["decision_data"] = decision.data
+            if meta_data:
+                denied_metadata["request_meta_data"] = dict(meta_data)
             self._emit_event(
                 denied_event_type,
                 operation,
@@ -198,10 +213,13 @@ class RequestHandler:
         self,
         operation: Operation,
         event_type: EventType,
+        meta_data: dict[str, Any] | None = None,
     ) -> RequestDecision:
+        resolved_meta_data = {} if meta_data is None else dict(meta_data)
         event = DispatchEvent(
             operation_id=operation.id,
             event_type=event_type,
+            meta_data=resolved_meta_data,
         )
         self._append_event_history(event)
 
@@ -217,7 +235,10 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        event.meta_data = self._decision_event_meta_data(decision)
+        event.meta_data = {
+            **resolved_meta_data,
+            **self._decision_event_meta_data(decision),
+        }
         self._record_request_event(
             operation_id=operation.id,
             event=event,
@@ -232,10 +253,13 @@ class RequestHandler:
         self,
         operation: Operation,
         event_type: EventType,
+        meta_data: dict[str, Any] | None = None,
     ) -> RequestDecision:
+        resolved_meta_data = {} if meta_data is None else dict(meta_data)
         event = DispatchEvent(
             operation_id=operation.id,
             event_type=event_type,
+            meta_data=resolved_meta_data,
         )
         self._append_event_history(event)
 
@@ -251,7 +275,10 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        event.meta_data = self._decision_event_meta_data(decision)
+        event.meta_data = {
+            **resolved_meta_data,
+            **self._decision_event_meta_data(decision),
+        }
         self._record_request_event(
             operation_id=operation.id,
             event=event,

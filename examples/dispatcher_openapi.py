@@ -6,6 +6,7 @@ from uuid import UUID
 
 from flask import Flask, jsonify
 from flasgger import Swagger
+from pydantic import BaseModel
 
 from operation_dispatcher import (
     BrowserEventVisualizer,
@@ -16,6 +17,12 @@ from operation_dispatcher import (
     Operation,
 )
 from operation_dispatcher import SimulatedOperationRunner
+
+
+class MyOperationPayload(BaseModel):
+    name: str
+    task: str
+    run_seconds: float
 
 
 class DemoDispatcherService:
@@ -88,6 +95,9 @@ class DemoDispatcherService:
 
         operation_dispatcher_api = OperationDispatcherOpenAPI(
             self.operation_dispatcher,
+            default_operation_payload=MyOperationPayload(
+                name="default_operation", task="default_task", run_seconds=5.0
+            ).model_dump(),
         )
 
         swagger_template = {
@@ -133,22 +143,22 @@ class DemoDispatcherService:
     async def run_demo(self) -> None:
         self.operation_dispatcher.add_operation(
             Operation(
-                payload={
-                    "name": "my_operation_1",
-                    "task": "pickup",
-                    "run_seconds": 10.0,
-                },
+                payload=MyOperationPayload(
+                    name="my_operation_1",
+                    task="pickup",
+                    run_seconds=10.0,
+                ).model_dump(),
                 resource_id="robot-1",
                 priority=0,
             )
         )
         self.operation_dispatcher.add_operation(
             Operation(
-                payload={
-                    "name": "my_operation_2",
-                    "task": "dropoff",
-                    "run_seconds": 8.0,
-                },
+                payload=MyOperationPayload(
+                    name="my_operation_2",
+                    task="dropoff",
+                    run_seconds=8.0,
+                ).model_dump(),
                 resource_id="robot-1",
                 priority=0,
             )

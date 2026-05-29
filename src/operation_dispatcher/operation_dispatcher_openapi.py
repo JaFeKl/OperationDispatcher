@@ -12,6 +12,7 @@ from .models import (
     EventType,
     ExecutionState,
     Operation,
+    TerminationReason,
 )
 from .operation_dispatcher import OperationDispatcher
 from .runtime_controller import OperationDispatcherRuntimeController
@@ -29,14 +30,18 @@ class OperationDispatcherOpenAPI:
     def __init__(
         self,
         operation_dispatcher: OperationDispatcher,
-        default_operation_payload: dict[str, Any] = {},
+        default_operation_payload: Optional[dict[str, Any]] = None,
         runtime_controller: Optional[
             OperationDispatcherRuntimeController | None
         ] = None,
     ) -> None:
         self._operation_dispatcher = operation_dispatcher
         self._resource_id = operation_dispatcher.dispatch_queue.resource_id
-        self._default_operation_payload = default_operation_payload
+        self._default_operation_payload = (
+            dict(default_operation_payload)
+            if default_operation_payload is not None
+            else {}
+        )
         self._operation_openapi_definitions: dict[str, Any] = {}
         if runtime_controller is None:
             self._runtime_controller = OperationDispatcherRuntimeController(
@@ -49,6 +54,15 @@ class OperationDispatcherOpenAPI:
 
     def _get_runtime_state_payload(self) -> dict[str, Any]:
         return self._runtime_controller.get_state_payload()
+
+    def _build_payload_property_schema(self) -> dict[str, Any]:
+        payload_schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": True,
+        }
+        if self._default_operation_payload:
+            payload_schema["example"] = dict(self._default_operation_payload)
+        return payload_schema
 
     @staticmethod
     def _error_response(
@@ -290,10 +304,78 @@ class OperationDispatcherOpenAPI:
 
         return operation, 201
 
+    def _parse_meta_data(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
+        meta_data = payload.get("meta_data")
+        if meta_data is None:
+            return None, None, 200
+        if not isinstance(meta_data, dict):
+            error_payload, status_code = self._error_response(
+                message="meta_data must be an object",
+                code="invalid_meta_data",
+                status_code=400,
+            )
+            return None, error_payload, status_code
+        return dict(meta_data), None, 200
+
+    def _parse_termination_reason(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[TerminationReason, dict[str, Any] | None, int]:
+        raw_termination_reason = payload.get("termination_reason")
+        if raw_termination_reason is None:
+            return TerminationReason.INTERNAL_ERROR, None, 200
+
+        if isinstance(raw_termination_reason, TerminationReason):
+            return raw_termination_reason, None, 200
+
+        try:
+            return TerminationReason(str(raw_termination_reason)), None, 200
+        except ValueError:
+            error_payload, status_code = self._error_response(
+                message="invalid termination_reason",
+                code="invalid_termination_reason",
+                status_code=400,
+                details={
+                    "valid_termination_reasons": [
+                        reason.value for reason in TerminationReason
+                    ]
+                },
+            )
+            return TerminationReason.INTERNAL_ERROR, error_payload, status_code
+
     def cancel_operation_response(
         self,
         operation_id: str,
+        command_payload: Any = None,
     ) -> tuple[dict[str, Any], int]:
+        if command_payload is None:
+            resolved_command_payload: dict[str, Any] = {}
+        elif isinstance(command_payload, dict):
+            resolved_command_payload = command_payload
+        else:
+            return self._error_response(
+                message="request body must be an object",
+                code="invalid_request_body",
+                status_code=400,
+            )
+
+        meta_data, meta_data_error, meta_data_status = self._parse_meta_data(
+            resolved_command_payload
+        )
+        if meta_data_error is not None:
+            return meta_data_error, meta_data_status
+
+        (
+            termination_reason,
+            termination_reason_error,
+            termination_reason_status,
+        ) = self._parse_termination_reason(resolved_command_payload)
+        if termination_reason_error is not None:
+            return termination_reason_error, termination_reason_status
+
         try:
             parsed_operation_id = UUID(operation_id)
         except ValueError as error:
@@ -314,7 +396,9 @@ class OperationDispatcherOpenAPI:
             )
 
         cancelled_operation = self._operation_dispatcher.cancel_operation(
-            parsed_operation_id
+            parsed_operation_id,
+            termination_reason=termination_reason,
+            meta_data=meta_data,
         )
         if cancelled_operation is None:
             return self._error_response(
@@ -392,7 +476,25 @@ class OperationDispatcherOpenAPI:
     def pause_operation_response(
         self,
         operation_id: str,
+        command_payload: Any = None,
     ) -> tuple[dict[str, Any], int]:
+        if command_payload is None:
+            resolved_command_payload: dict[str, Any] = {}
+        elif isinstance(command_payload, dict):
+            resolved_command_payload = command_payload
+        else:
+            return self._error_response(
+                message="request body must be an object",
+                code="invalid_request_body",
+                status_code=400,
+            )
+
+        meta_data, meta_data_error, meta_data_status = self._parse_meta_data(
+            resolved_command_payload
+        )
+        if meta_data_error is not None:
+            return meta_data_error, meta_data_status
+
         operation_status_payload, operation_status_code = (
             self._resolve_operation_status_response(operation_id)
         )
@@ -412,7 +514,10 @@ class OperationDispatcherOpenAPI:
 
         try:
             operation_uuid = UUID(operation_status_payload["operation"]["id"])
-            is_paused = self._operation_dispatcher.pause_operation(operation_uuid)
+            is_paused = self._operation_dispatcher.pause_operation(
+                operation_uuid,
+                meta_data=meta_data,
+            )
         except RuntimeError as error:
             if str(error) == "current operation is not running":
                 return self._error_response(
@@ -438,7 +543,25 @@ class OperationDispatcherOpenAPI:
     def resume_operation_response(
         self,
         operation_id: str,
+        command_payload: Any = None,
     ) -> tuple[dict[str, Any], int]:
+        if command_payload is None:
+            resolved_command_payload: dict[str, Any] = {}
+        elif isinstance(command_payload, dict):
+            resolved_command_payload = command_payload
+        else:
+            return self._error_response(
+                message="request body must be an object",
+                code="invalid_request_body",
+                status_code=400,
+            )
+
+        meta_data, meta_data_error, meta_data_status = self._parse_meta_data(
+            resolved_command_payload
+        )
+        if meta_data_error is not None:
+            return meta_data_error, meta_data_status
+
         operation_status_payload, operation_status_code = (
             self._resolve_operation_status_response(operation_id)
         )
@@ -458,7 +581,10 @@ class OperationDispatcherOpenAPI:
 
         try:
             operation_uuid = UUID(operation_status_payload["operation"]["id"])
-            is_resumed = self._operation_dispatcher.resume_operation(operation_uuid)
+            is_resumed = self._operation_dispatcher.resume_operation(
+                operation_uuid,
+                meta_data=meta_data,
+            )
         except RuntimeError as error:
             if str(error) == "current operation is not paused":
                 return self._error_response(
@@ -663,7 +789,8 @@ class OperationDispatcherOpenAPI:
             endpoint_name=endpoint_name,
             openapi_spec=self.cancel_operation_openapi_spec(),
             response_handler=lambda: self.cancel_operation_response(
-                operation_id=request.view_args.get("operation_id", "")
+                operation_id=request.view_args.get("operation_id", ""),
+                command_payload=self._parse_json_body(),
             ),
         )
 
@@ -698,7 +825,8 @@ class OperationDispatcherOpenAPI:
             endpoint_name=endpoint_name,
             openapi_spec=self.pause_operation_openapi_spec(),
             response_handler=lambda: self.pause_operation_response(
-                operation_id=request.view_args.get("operation_id", "")
+                operation_id=request.view_args.get("operation_id", ""),
+                command_payload=self._parse_json_body(),
             ),
         )
 
@@ -715,7 +843,8 @@ class OperationDispatcherOpenAPI:
             endpoint_name=endpoint_name,
             openapi_spec=self.resume_operation_openapi_spec(),
             response_handler=lambda: self.resume_operation_response(
-                operation_id=request.view_args.get("operation_id", "")
+                operation_id=request.view_args.get("operation_id", ""),
+                command_payload=self._parse_json_body(),
             ),
         )
 
@@ -949,6 +1078,7 @@ class OperationDispatcherOpenAPI:
     def cancel_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -957,7 +1087,15 @@ class OperationDispatcherOpenAPI:
                     "required": True,
                     "type": "string",
                     "format": "uuid",
-                }
+                },
+                {
+                    "in": "body",
+                    "name": "body",
+                    "required": False,
+                    "schema": {
+                        "$ref": "#/definitions/CancelOperationCommand",
+                    },
+                },
             ],
             "responses": {
                 200: {"schema": {"$ref": "#/definitions/OperationStatus"}},
@@ -1002,6 +1140,7 @@ class OperationDispatcherOpenAPI:
     def pause_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -1010,7 +1149,15 @@ class OperationDispatcherOpenAPI:
                     "required": True,
                     "type": "string",
                     "format": "uuid",
-                }
+                },
+                {
+                    "in": "body",
+                    "name": "body",
+                    "required": False,
+                    "schema": {
+                        "$ref": "#/definitions/LifecycleCommand",
+                    },
+                },
             ],
             "responses": {
                 200: {"schema": {"$ref": "#/definitions/OperationStatus"}},
@@ -1024,6 +1171,7 @@ class OperationDispatcherOpenAPI:
     def resume_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -1032,7 +1180,15 @@ class OperationDispatcherOpenAPI:
                     "required": True,
                     "type": "string",
                     "format": "uuid",
-                }
+                },
+                {
+                    "in": "body",
+                    "name": "body",
+                    "required": False,
+                    "schema": {
+                        "$ref": "#/definitions/LifecycleCommand",
+                    },
+                },
             ],
             "responses": {
                 200: {"schema": {"$ref": "#/definitions/OperationStatus"}},
@@ -1151,7 +1307,7 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
-                    "payload": self._default_operation_payload,
+                    "payload": self._build_payload_property_schema(),
                     "resource_id": {"type": "string"},
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
@@ -1307,7 +1463,7 @@ class OperationDispatcherOpenAPI:
             "AddOperationItem": {
                 "type": "object",
                 "properties": {
-                    "payload": {**self._default_operation_payload, "example": {}},
+                    "payload": self._build_payload_property_schema(),
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
                     "planned_duration": {
@@ -1325,6 +1481,38 @@ class OperationDispatcherOpenAPI:
                 "example": {
                     "priority": 2,
                     "payload": {"task": "updated"},
+                },
+            },
+            "LifecycleCommand": {
+                "type": "object",
+                "properties": {
+                    "meta_data": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "default": {},
+                        "example": {},
+                    },
+                },
+                "example": {"meta_data": {}},
+            },
+            "CancelOperationCommand": {
+                "type": "object",
+                "properties": {
+                    "meta_data": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "default": {},
+                        "example": {},
+                    },
+                    "termination_reason": {
+                        "type": "string",
+                        "enum": [reason.value for reason in TerminationReason],
+                        "default": TerminationReason.INTERNAL_ERROR.value,
+                    },
+                },
+                "example": {
+                    "meta_data": {},
+                    "termination_reason": TerminationReason.INTERNAL_ERROR.value,
                 },
             },
         }
