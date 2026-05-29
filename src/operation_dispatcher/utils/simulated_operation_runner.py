@@ -27,25 +27,32 @@ class SimulatedOperationRunner:
         self._pause_event = threading.Event()
         self._stop_event = threading.Event()
 
-    def start(self, operation_id: UUID, run_seconds: float) -> None:
-        if run_seconds <= 0:
-            raise ValueError("run_seconds must be greater than 0")
+    def start(self, operation_id: UUID, run_seconds: float) -> bool:
+        try:
+            if run_seconds <= 0:
+                raise ValueError("run_seconds must be greater than 0")
 
-        self.cancel()
+            self.cancel()
 
-        with self._lock:
-            self._operation_id = operation_id
-            self._remaining_seconds = run_seconds
-            self._stop_event.clear()
-            self._pause_event.set()
-            self._worker_thread = threading.Thread(
-                target=self._run_worker,
-                name=f"SimulatedOperationRunner-{operation_id}",
-                daemon=True,
+            with self._lock:
+                self._operation_id = operation_id
+                self._remaining_seconds = run_seconds
+                self._stop_event.clear()
+                self._pause_event.set()
+                self._worker_thread = threading.Thread(
+                    target=self._run_worker,
+                    name=f"SimulatedOperationRunner-{operation_id}",
+                    daemon=True,
+                )
+                worker_thread = self._worker_thread
+
+            worker_thread.start()
+            return True
+        except Exception as e:
+            self._logger.warning(
+                f"failed to start simulated operation {operation_id} with error: {e}"
             )
-            worker_thread = self._worker_thread
-
-        worker_thread.start()
+            return False
 
     def pause(self, operation_id: UUID) -> bool:
         with self._lock:

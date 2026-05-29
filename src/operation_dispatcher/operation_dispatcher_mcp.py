@@ -1,18 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from operation_dispatcher.operation_dispatcher import OperationDispatcher
-from operation_dispatcher.runtime_controller import OperationDispatcherRuntimeController
-
-if TYPE_CHECKING:
-    from operation_dispatcher.operation_dispatcher_openapi import (
-        OperationDispatcherOpenAPI,
-    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -27,7 +24,7 @@ class OperationDispatcherMCPServer:
 
     def __init__(
         self,
-        operation_dispatcher: OperationDispatcher | OperationDispatcherOpenAPI,
+        operation_dispatcher: OperationDispatcher,
         *,
         name: str = "Operation Dispatcher",
         instructions: str | None = None,
@@ -39,24 +36,13 @@ class OperationDispatcherMCPServer:
         runtime_stop_join_timeout_seconds: float = 2.0,
         **fastmcp_kwargs: Any,
     ) -> None:
-        from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
-
-        if isinstance(operation_dispatcher, OperationDispatcherOpenAPI):
-            self._operation_dispatcher_api: OperationDispatcherOpenAPI | None = (
-                operation_dispatcher
-            )
-            self._operation_dispatcher = operation_dispatcher._operation_dispatcher
-            self._manage_dispatcher_runtime = False
-            self._runtime_controller = operation_dispatcher.runtime_controller
-        else:
-            self._operation_dispatcher_api = None
-            self._operation_dispatcher = operation_dispatcher
-            self._manage_dispatcher_runtime = manage_dispatcher_runtime
-            self._runtime_controller = OperationDispatcherRuntimeController(
-                operation_dispatcher=operation_dispatcher,
-                startup_timeout_seconds=runtime_startup_timeout_seconds,
-                stop_join_timeout_seconds=runtime_stop_join_timeout_seconds,
-            )
+        self._operation_dispatcher = operation_dispatcher
+        self._manage_dispatcher_runtime = manage_dispatcher_runtime
+        self._runtime_startup_timeout_seconds = runtime_startup_timeout_seconds
+        self._runtime_stop_join_timeout_seconds = runtime_stop_join_timeout_seconds
+        self._runtime_thread: threading.Thread | None = None
+        self._runtime_last_error: str | None = None
+        self._runtime_lock = threading.Lock()
 
         self._mcp = FastMCP(
             name=name,
@@ -111,87 +97,128 @@ class OperationDispatcherMCPServer:
         return lifespan
 
     def _dispatcher_state_payload(self) -> dict[str, Any]:
-        if self._operation_dispatcher_api is not None:
-            state, _ = (
-                self._operation_dispatcher_api.get_operation_dispatcher_state_response()
-            )
-            state = dict(state)
-            state["runtime_managed_by"] = "openapi"
-            return state
-
-        state = self._runtime_controller.get_state_payload()
+        state = self._operation_dispatcher.get_state().model_dump(mode="json")
+        state["runtime_thread_alive"] = (
+            self._runtime_thread.is_alive()
+            if self._runtime_thread is not None
+            else False
+        )
+        state["runtime_last_error"] = self._runtime_last_error
         state["runtime_managed_by"] = (
             "mcp" if self._manage_dispatcher_runtime else "external"
         )
         return state
 
     def start_dispatcher_runtime(self) -> dict[str, Any]:
-        if self._operation_dispatcher_api is not None:
-            payload, status_code = (
-                self._operation_dispatcher_api.start_operation_dispatcher_response()
-            )
-            return {
-                "status_code": status_code,
-                "response": payload,
-            }
-
         if not self._manage_dispatcher_runtime:
             return {
                 "message": "dispatcher runtime is managed externally",
                 "state": self._dispatcher_state_payload(),
             }
 
-        payload, _ = self._runtime_controller.start()
-        payload = dict(payload)
-        payload["state"] = self._dispatcher_state_payload()
-        return payload
+        with self._runtime_lock:
+            if self._operation_dispatcher.is_running:
+                return {
+                    "message": "operation dispatcher is already running",
+                    "state": self._dispatcher_state_payload(),
+                }
+
+            runtime_thread = self._runtime_thread
+            if runtime_thread is not None and runtime_thread.is_alive():
+                return {
+                    "message": "operation dispatcher runtime thread already active",
+                    "state": self._dispatcher_state_payload(),
+                }
+
+            self._runtime_last_error = None
+
+            def run_dispatcher() -> None:
+                try:
+                    asyncio.run(self._operation_dispatcher.run())
+                except Exception as error:
+                    self._runtime_last_error = str(error)
+
+            self._runtime_thread = threading.Thread(
+                target=run_dispatcher,
+                name="OperationDispatcherMCPRuntimeThread",
+                daemon=True,
+            )
+            self._runtime_thread.start()
+
+        deadline = time.time() + self._runtime_startup_timeout_seconds
+        while not self._operation_dispatcher.is_running and time.time() < deadline:
+            time.sleep(0.01)
+
+        state = self._dispatcher_state_payload()
+        if self._operation_dispatcher.is_running:
+            return {
+                "message": "operation dispatcher started",
+                "state": state,
+            }
+
+        if self._runtime_last_error:
+            return {
+                "message": "operation dispatcher failed to start",
+                "state": state,
+                "error": self._runtime_last_error,
+            }
+
+        return {
+            "message": "operation dispatcher start requested",
+            "state": state,
+        }
 
     def stop_dispatcher_runtime(self) -> dict[str, Any]:
-        if self._operation_dispatcher_api is not None:
-            payload, status_code = (
-                self._operation_dispatcher_api.stop_operation_dispatcher_response()
-            )
-            return {
-                "status_code": status_code,
-                "response": payload,
-            }
-
         if not self._manage_dispatcher_runtime:
             return {
                 "message": "dispatcher runtime is managed externally",
                 "state": self._dispatcher_state_payload(),
             }
 
-        payload, _ = self._runtime_controller.stop()
-        payload = dict(payload)
-        payload["state"] = self._dispatcher_state_payload()
-        return payload
+        with self._runtime_lock:
+            runtime_thread = self._runtime_thread
+            runtime_active = runtime_thread is not None and runtime_thread.is_alive()
+            if not self._operation_dispatcher.is_running and not runtime_active:
+                return {
+                    "message": "operation dispatcher is not running",
+                    "state": self._dispatcher_state_payload(),
+                }
+
+            self._operation_dispatcher.request_stop()
+
+        if runtime_thread is not None and runtime_thread.is_alive():
+            runtime_thread.join(timeout=self._runtime_stop_join_timeout_seconds)
+
+        return {
+            "message": "operation dispatcher stopped",
+            "state": self._dispatcher_state_payload(),
+        }
 
     def resume_dispatcher_runtime(self) -> dict[str, Any]:
-        if self._operation_dispatcher_api is not None:
-            payload, status_code = (
-                self._operation_dispatcher_api.resume_operation_dispatcher_response()
-            )
+        if not self._operation_dispatcher.is_paused:
             return {
-                "status_code": status_code,
-                "response": payload,
+                "message": "operation dispatcher is not paused",
+                "state": self._dispatcher_state_payload(),
             }
 
-        payload, _ = self._runtime_controller.resume()
-        return payload
+        self._operation_dispatcher.resume_dispatcher_runtime()
+        return {
+            "message": "operation dispatcher resumed",
+            "state": self._dispatcher_state_payload(),
+        }
 
     def pause_dispatcher_runtime(self) -> dict[str, Any]:
-        if self._operation_dispatcher_api is not None:
-            payload, status_code = (
-                self._operation_dispatcher_api.pause_operation_dispatcher_response()
-            )
+        if self._operation_dispatcher.is_paused:
             return {
-                "status_code": status_code,
-                "response": payload,
+                "message": "operation dispatcher is already paused",
+                "state": self._dispatcher_state_payload(),
             }
 
-        payload, _ = self._runtime_controller.pause()
-        return payload
+        self._operation_dispatcher.pause_dispatcher_runtime()
+        return {
+            "message": "operation dispatcher paused",
+            "state": self._dispatcher_state_payload(),
+        }
 
     def _register_base_tools(self) -> None:
         @self._mcp.tool(
@@ -231,7 +258,7 @@ class OperationDispatcherMCPServer:
 
 
 def create_operation_dispatcher_mcp_server(
-    operation_dispatcher: OperationDispatcher | OperationDispatcherOpenAPI,
+    operation_dispatcher: OperationDispatcher,
     **kwargs: Any,
 ) -> OperationDispatcherMCPServer:
     """Build an MCP server around an existing `OperationDispatcher` instance."""

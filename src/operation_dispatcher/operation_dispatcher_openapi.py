@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import asyncio
-import threading
-import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 from flask import jsonify, request
@@ -17,6 +14,7 @@ from .models import (
     Operation,
 )
 from .operation_dispatcher import OperationDispatcher
+from .runtime_controller import OperationDispatcherRuntimeController
 
 
 class OperationDispatcherOpenAPI:
@@ -31,31 +29,26 @@ class OperationDispatcherOpenAPI:
     def __init__(
         self,
         operation_dispatcher: OperationDispatcher,
-        default_operation_name: str = "payload",
+        default_operation_payload: dict[str, Any] = {},
+        runtime_controller: Optional[
+            OperationDispatcherRuntimeController | None
+        ] = None,
     ) -> None:
         self._operation_dispatcher = operation_dispatcher
         self._resource_id = operation_dispatcher.dispatch_queue.resource_id
-        self._default_operation_name = default_operation_name
-        self._operation_openapi_schema: dict[str, Any] = {
-            "type": "object",
-            "additionalProperties": True,
-        }
+        self._default_operation_payload = default_operation_payload
         self._operation_openapi_definitions: dict[str, Any] = {}
-        self._startup_timeout_seconds = 1.0
-        self._stop_join_timeout_seconds = 2.0
-        self._runtime_thread: threading.Thread | None = None
-        self._runtime_last_error: str | None = None
-        self._runtime_lock = threading.Lock()
+        if runtime_controller is None:
+            self._runtime_controller = OperationDispatcherRuntimeController(
+                operation_dispatcher=operation_dispatcher,
+                startup_timeout_seconds=1.0,
+                stop_join_timeout_seconds=2.0,
+            )
+        else:
+            self._runtime_controller = runtime_controller
 
     def _get_runtime_state_payload(self) -> dict[str, Any]:
-        state = self._operation_dispatcher.get_state().model_dump(mode="json")
-        state["runtime_thread_alive"] = (
-            self._runtime_thread.is_alive()
-            if self._runtime_thread is not None
-            else False
-        )
-        state["runtime_last_error"] = self._runtime_last_error
-        return state
+        return self._runtime_controller.get_state_payload()
 
     @staticmethod
     def _error_response(
@@ -492,106 +485,16 @@ class OperationDispatcherOpenAPI:
         return self._get_runtime_state_payload(), 200
 
     def start_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        with self._runtime_lock:
-            if self._operation_dispatcher.is_running:
-                return {
-                    "message": "operation dispatcher is already running",
-                    "state": self._get_runtime_state_payload(),
-                }, 409
-
-            if self._runtime_thread is not None and self._runtime_thread.is_alive():
-                return {
-                    "message": "operation dispatcher runtime thread already active",
-                    "state": self._get_runtime_state_payload(),
-                }, 409
-
-            self._runtime_last_error = None
-
-            def run_operation_dispatcher() -> None:
-                try:
-                    asyncio.run(self._operation_dispatcher.run())
-                except Exception as error:
-                    self._runtime_last_error = str(error)
-
-            self._runtime_thread = threading.Thread(
-                target=run_operation_dispatcher,
-                name="OperationDispatcherRuntimeThread",
-                daemon=True,
-            )
-            self._runtime_thread.start()
-
-        deadline = time.time() + self._startup_timeout_seconds
-        while not self._operation_dispatcher.is_running and time.time() < deadline:
-            time.sleep(0.01)
-
-        state = self._get_runtime_state_payload()
-        if self._operation_dispatcher.is_running:
-            return {
-                "message": "operation dispatcher started",
-                "state": state,
-            }, 202
-
-        if self._runtime_last_error:
-            return {
-                "message": "operation dispatcher failed to start",
-                "state": state,
-                "error": self._runtime_last_error,
-            }, 500
-
-        return {
-            "message": "operation dispatcher start requested",
-            "state": state,
-        }, 202
+        return self._runtime_controller.start()
 
     def stop_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        with self._runtime_lock:
-            runtime_active = (
-                self._runtime_thread is not None and self._runtime_thread.is_alive()
-            )
-            if not self._operation_dispatcher.is_running and not runtime_active:
-                return {
-                    "message": "operation dispatcher is not running",
-                    "state": self._get_runtime_state_payload(),
-                }, 409
-
-            self._operation_dispatcher.request_stop()
-            runtime_thread = self._runtime_thread
-
-        if runtime_thread is not None and runtime_thread.is_alive():
-            runtime_thread.join(timeout=self._stop_join_timeout_seconds)
-
-        return {
-            "message": "operation dispatcher stopped",
-            "state": self._get_runtime_state_payload(),
-        }, 202
+        return self._runtime_controller.stop()
 
     def pause_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        if self._operation_dispatcher.is_paused:
-            return {
-                "message": "operation dispatcher is already paused",
-                "state": self._get_runtime_state_payload(),
-            }, 409
-
-        self._operation_dispatcher.pause_dispatcher_runtime()
-
-        return {
-            "message": "operation dispatcher paused",
-            "state": self._get_runtime_state_payload(),
-        }, 200
+        return self._runtime_controller.pause()
 
     def resume_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        if not self._operation_dispatcher.is_paused:
-            return {
-                "message": "operation dispatcher is not paused",
-                "state": self._get_runtime_state_payload(),
-            }, 409
-
-        self._operation_dispatcher.resume_dispatcher_runtime()
-
-        return {
-            "message": "operation dispatcher resumed",
-            "state": self._get_runtime_state_payload(),
-        }, 200
+        return self._runtime_controller.resume()
 
     def register_default_endpoints(self, app: Any) -> None:
         self.register_list_operations_endpoint(app)
@@ -1248,7 +1151,7 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
-                    "payload": self._operation_openapi_schema,
+                    "payload": self._default_operation_payload,
                     "resource_id": {"type": "string"},
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
@@ -1404,7 +1307,7 @@ class OperationDispatcherOpenAPI:
             "AddOperationItem": {
                 "type": "object",
                 "properties": {
-                    "payload": {**self._operation_openapi_schema, "example": {}},
+                    "payload": {**self._default_operation_payload, "example": {}},
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
                     "planned_duration": {

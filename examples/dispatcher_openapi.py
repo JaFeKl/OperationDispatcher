@@ -50,9 +50,6 @@ class DemoDispatcherService:
             f"Received request {event.event_type} for operation_id {event.operation_id}"
         )
 
-        if event.operation_id is None:
-            return None
-
         operation = self.operation_dispatcher.get_operation(event.operation_id)
         if operation is None:
             self._logger.warning(
@@ -61,47 +58,18 @@ class DemoDispatcherService:
             return None
 
         if event.event_type is EventType.OPERATION_START_REQUESTED:
-            try:
-                self._simulated_runner.start(
-                    operation_id=operation.id,
-                    run_seconds=float(operation.payload.get("run_seconds", 5.0)),
-                )
-                return True
-            except RuntimeError as e:
-                self._logger.warning(
-                    f"start request failed for operation {event.operation_id} with error: {e}"
-                )
-                return False
-
+            return self._simulated_runner.start(
+                operation_id=operation.id,
+                run_seconds=float(operation.payload.get("run_seconds", 5.0)),
+            )
         if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
-            try:
-                self._simulated_runner.cancel(operation_id=operation.id)
-                return True
-            except RuntimeError as e:
-                self._logger.warning(
-                    f"cancel request failed for operation {event.operation_id} with error: {e}"
-                )
-                return False
+            return self._simulated_runner.cancel(operation_id=operation.id)
 
         if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
-            try:
-                self._simulated_runner.pause(operation_id=operation.id)
-                return True
-            except RuntimeError as e:
-                self._logger.warning(
-                    f"pause request failed for operation {event.operation_id} with error: {e}"
-                )
-                return False
+            return self._simulated_runner.pause(operation_id=operation.id)
 
         if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
-            try:
-                self._simulated_runner.resume(operation_id=operation.id)
-            except RuntimeError as e:
-                self._logger.warning(
-                    f"resume request failed for operation {event.operation_id} with error: {e}"
-                )
-                return False
-            return True
+            return self._simulated_runner.resume(operation_id=operation.id)
 
         return None
 

@@ -28,7 +28,7 @@ class DemoDispatcherService:
     - OpenAPI (Flask)
     - MCP (SSE transport)
 
-    Both interfaces share the same dispatcher instance and runtime controller.
+    Both interfaces share the same dispatcher instance.
     """
 
     def __init__(
@@ -210,7 +210,7 @@ class DemoDispatcherService:
 
     def create_mcp_server(self) -> OperationDispatcherMCPServer:
         return OperationDispatcherMCPServer(
-            self.dispatcher_api,
+            self.dispatcher,
             name="Shared Operation Dispatcher",
             instructions=(
                 "This MCP server exposes a shared OperationDispatcher. "

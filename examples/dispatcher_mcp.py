@@ -45,10 +45,8 @@ class DemoDispatcherMCPService:
             f"Received request {event.event_type} for operation_id {event.operation_id}"
         )
 
-        scheduled_operation = self.operation_dispatcher.get_scheduled_operation(
-            event.operation_id
-        )
-        if scheduled_operation is None:
+        operation = self.operation_dispatcher.get_operation(event.operation_id)
+        if operation is None:
             self._logger.warning(
                 "received request event for unknown operation_id %s",
                 event.operation_id,
@@ -56,31 +54,19 @@ class DemoDispatcherMCPService:
             return None
 
         if event.event_type is EventType.OPERATION_START_REQUESTED:
-            try:
-                self._simulated_runner.start(
-                    operation_id=scheduled_operation.id,
-                    run_seconds=float(
-                        scheduled_operation.payload.get("run_seconds", 2.0)
-                    ),
-                )
-                return True
-            except RuntimeError as error:
-                self._logger.warning(
-                    "start request failed for operation %s: %s",
-                    event.operation_id,
-                    error,
-                )
-                return False
+            return self._simulated_runner.start(
+                operation_id=operation.id,
+                run_seconds=float(operation.payload.get("run_seconds", 2.0)),
+            )
 
-        if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
-            self._simulated_runner.cancel(operation_id=scheduled_operation.id)
-            return True
+        elif event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
+            return self._simulated_runner.cancel(operation_id=operation.id)
 
-        if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
-            return self._simulated_runner.pause(operation_id=scheduled_operation.id)
+        elif event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
+            return self._simulated_runner.pause(operation_id=operation.id)
 
-        if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
-            return self._simulated_runner.resume(operation_id=scheduled_operation.id)
+        elif event.event_type is EventType.OPERATION_RESUME_REQUESTED:
+            return self._simulated_runner.resume(operation_id=operation.id)
 
         return None
 
@@ -90,21 +76,10 @@ class DemoDispatcherMCPService:
         )
 
     def _on_completed(self, operation_id: UUID) -> None:
-        current = self.operation_dispatcher.current_scheduled_operation
-        if current is None or current.id != operation_id:
-            self._logger.warning(
-                "simulated completion callback received for non-current operation_id %s",
-                operation_id,
-            )
-            return
-
-        self.operation_dispatcher.complete_current()
-
-    def stop(self) -> None:
-        self._simulated_runner.cancel()
+        self.operation_dispatcher.complete_operation(operation_id)
 
     def run_demo(self) -> None:
-        self.operation_dispatcher.add(
+        self.operation_dispatcher.add_operation(
             Operation(
                 payload={
                     "name": "my_operation_1",
@@ -115,7 +90,7 @@ class DemoDispatcherMCPService:
                 priority=0,
             )
         )
-        self.operation_dispatcher.add(
+        self.operation_dispatcher.add_operation(
             Operation(
                 payload={
                     "name": "my_operation_2",
