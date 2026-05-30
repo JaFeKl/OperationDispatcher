@@ -11,6 +11,7 @@ from operation_dispatcher import (
     Operation,
     TerminationReason,
 )
+from operation_dispatcher.action_descriptions import OPENAPI_ACTION_DESCRIPTIONS
 
 
 def _operation(
@@ -529,6 +530,7 @@ def test_openapi_definitions_include_operation_status_model() -> None:
     assert "UpdateOperationItem" in definitions
     assert "LifecycleCommand" in definitions
     assert "CancelOperationCommand" in definitions
+    assert definitions["DispatchEvent"]["properties"]["meta_data"]["default"] == {}
     assert definitions["LifecycleCommand"]["properties"]["meta_data"]["default"] == {}
     assert (
         definitions["CancelOperationCommand"]["properties"]["meta_data"]["default"]
@@ -572,3 +574,45 @@ def test_openapi_get_operation_reports_not_found() -> None:
 
     assert status == 404
     assert payload["code"] == "operation_not_found"
+
+
+def test_openapi_specs_use_centralized_action_descriptions() -> None:
+    specs = {
+        "list_operations": OperationDispatcherOpenAPI.list_operations_openapi_spec(),
+        "get_operation": OperationDispatcherOpenAPI.get_operation_openapi_spec(),
+        "get_current_operation": (
+            OperationDispatcherOpenAPI.get_current_operation_openapi_spec()
+        ),
+        "get_operation_events": (
+            OperationDispatcherOpenAPI.get_operation_events_openapi_spec()
+        ),
+        "get_operations_history": (
+            OperationDispatcherOpenAPI.get_operations_history_openapi_spec()
+        ),
+        "add_operation": OperationDispatcherOpenAPI.add_operation_openapi_spec(),
+        "cancel_operation": OperationDispatcherOpenAPI.cancel_operation_openapi_spec(),
+        "update_operation": OperationDispatcherOpenAPI.update_operation_openapi_spec(),
+        "pause_operation": OperationDispatcherOpenAPI.pause_operation_openapi_spec(),
+        "resume_operation": OperationDispatcherOpenAPI.resume_operation_openapi_spec(),
+        "get_dispatcher_state": (
+            OperationDispatcherOpenAPI.get_operation_dispatcher_state_openapi_spec()
+        ),
+        "start_operation_dispatcher": (
+            OperationDispatcherOpenAPI.start_operation_dispatcher_openapi_spec()
+        ),
+        "stop_operation_dispatcher": (
+            OperationDispatcherOpenAPI.stop_operation_dispatcher_openapi_spec()
+        ),
+        "pause_operation_dispatcher": (
+            OperationDispatcherOpenAPI.pause_operation_dispatcher_openapi_spec()
+        ),
+        "resume_operation_dispatcher": (
+            OperationDispatcherOpenAPI.resume_operation_dispatcher_openapi_spec()
+        ),
+    }
+
+    assert set(specs) == set(OPENAPI_ACTION_DESCRIPTIONS)
+
+    for action_name, spec in specs.items():
+        assert spec["description"] == OPENAPI_ACTION_DESCRIPTIONS[action_name].description
+        assert spec["description"].strip() != ""

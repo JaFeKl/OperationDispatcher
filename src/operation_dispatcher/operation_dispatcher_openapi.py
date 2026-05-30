@@ -14,6 +14,7 @@ from .models import (
     Operation,
     TerminationReason,
 )
+from .action_descriptions import OPENAPI_ACTION_DESCRIPTIONS
 from .operation_dispatcher import OperationDispatcher
 from .runtime_controller import OperationDispatcherRuntimeController
 
@@ -927,6 +928,7 @@ class OperationDispatcherOpenAPI:
     def list_operations_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["list_operations"].description,
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -956,6 +958,7 @@ class OperationDispatcherOpenAPI:
     def get_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["get_operation"].description,
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -980,6 +983,9 @@ class OperationDispatcherOpenAPI:
     def get_current_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "get_current_operation"
+            ].description,
             "produces": ["application/json"],
             "responses": {
                 200: {
@@ -997,6 +1003,9 @@ class OperationDispatcherOpenAPI:
     def get_operation_events_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "get_operation_events"
+            ].description,
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -1024,6 +1033,9 @@ class OperationDispatcherOpenAPI:
     def get_operations_history_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "get_operations_history"
+            ].description,
             "produces": ["application/json"],
             "parameters": [
                 {
@@ -1049,6 +1061,7 @@ class OperationDispatcherOpenAPI:
     def add_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["add_operation"].description,
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -1078,6 +1091,7 @@ class OperationDispatcherOpenAPI:
     def cancel_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["cancel_operation"].description,
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -1109,6 +1123,7 @@ class OperationDispatcherOpenAPI:
     def update_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["update_operation"].description,
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -1140,6 +1155,7 @@ class OperationDispatcherOpenAPI:
     def pause_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["pause_operation"].description,
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -1171,6 +1187,7 @@ class OperationDispatcherOpenAPI:
     def resume_operation_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS["resume_operation"].description,
             "consumes": ["application/json"],
             "produces": ["application/json"],
             "parameters": [
@@ -1202,6 +1219,9 @@ class OperationDispatcherOpenAPI:
     def get_operation_dispatcher_state_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Dispatcher Runtime"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "get_dispatcher_state"
+            ].description,
             "produces": ["application/json"],
             "responses": {
                 200: {
@@ -1215,6 +1235,9 @@ class OperationDispatcherOpenAPI:
     def start_operation_dispatcher_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Dispatcher Runtime"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "start_operation_dispatcher"
+            ].description,
             "produces": ["application/json"],
             "responses": {
                 202: {
@@ -1235,6 +1258,9 @@ class OperationDispatcherOpenAPI:
     def stop_operation_dispatcher_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Dispatcher Runtime"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "stop_operation_dispatcher"
+            ].description,
             "produces": ["application/json"],
             "responses": {
                 202: {
@@ -1255,6 +1281,9 @@ class OperationDispatcherOpenAPI:
     def pause_operation_dispatcher_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Dispatcher Runtime"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "pause_operation_dispatcher"
+            ].description,
             "produces": ["application/json"],
             "responses": {
                 200: {
@@ -1275,6 +1304,9 @@ class OperationDispatcherOpenAPI:
     def resume_operation_dispatcher_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Dispatcher Runtime"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "resume_operation_dispatcher"
+            ].description,
             "produces": ["application/json"],
             "responses": {
                 200: {
@@ -1391,7 +1423,12 @@ class OperationDispatcherOpenAPI:
                         "type": "array",
                         "items": {"$ref": "#/definitions/ChangeRecord"},
                     },
-                    "meta_data": {"type": "object", "additionalProperties": True},
+                    "meta_data": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "default": {},
+                        "example": {},
+                    },
                 },
                 "required": [
                     "id",
