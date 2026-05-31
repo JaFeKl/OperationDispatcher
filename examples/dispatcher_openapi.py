@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from uuid import UUID
 
@@ -43,7 +42,7 @@ class DemoDispatcherService:
             operation_dispatcher=self.operation_dispatcher,
         )
         self._visualizer.start()
-        logger.info("Event visualizer available at http://{}:8765".format(host))
+        self._logger.info("Event visualizer available at http://{}:8765".format(host))
 
         self._simulated_runner = SimulatedOperationRunner(
             on_complete=self._on_completed,
@@ -140,7 +139,7 @@ class DemoDispatcherService:
 
         return app
 
-    async def run_demo(self) -> None:
+    def run_demo(self) -> None:
         self.operation_dispatcher.add_operation(
             Operation(
                 payload=MyOperationPayload(
@@ -171,15 +170,18 @@ class DemoDispatcherService:
         self._visualizer.stop()
 
 
-async def main() -> None:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     demo_dispatcher = DemoDispatcherService(host="0.0.0.0", logger=logger)
     try:
-        await demo_dispatcher.run_demo()
+        demo_dispatcher.run_demo()
     finally:
         demo_dispatcher.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

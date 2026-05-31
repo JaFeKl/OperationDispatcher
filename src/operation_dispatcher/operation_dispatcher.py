@@ -67,6 +67,7 @@ class OperationDispatcherReference:
     def __init__(
         self,
         resource_id: str,
+        start_paused: bool = False,
         poll_interval_seconds: float = 0.1,
         start_request_max_retries: int = 5,
         start_request_retry_cooldown_seconds: float = 1.0,
@@ -112,7 +113,7 @@ class OperationDispatcherReference:
             retry_cooldown_seconds=start_request_retry_cooldown_seconds,
         )
 
-        self._is_paused = False
+        self._is_paused = start_paused
         self._stop_requested = False
         self._poll_interval_seconds = poll_interval_seconds
         self._running_since: datetime | None = None
@@ -860,6 +861,7 @@ class OperationDispatcher:
     def __init__(
         self,
         resource_id: str,
+        start_paused: bool = False,
         poll_interval_seconds: float = 0.1,
         start_request_max_retries: int = 5,
         start_request_retry_cooldown_seconds: float = 1.0,
@@ -906,6 +908,7 @@ class OperationDispatcher:
             default_planned_duration=default_planned_duration,
             updatable_fields=updatable_fields_set,
             on_history_callback=on_history_callback,
+            is_paused=start_paused,
         )
 
         self._mutation_service = DispatcherMutationService(self._state_store)
@@ -1068,7 +1071,7 @@ class OperationDispatcher:
         return await self._runtime_service.step_dispatch()
 
     async def run(self) -> None:
-        await self._runtime_service.run()
+        await self._runtime_service.run(start_paused=self._state_store.is_paused)
 
     def request_stop(self) -> None:
         self._runtime_service.request_stop()

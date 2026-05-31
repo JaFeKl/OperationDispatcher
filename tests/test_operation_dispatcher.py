@@ -164,6 +164,19 @@ def test_dispatcher_pause_blocks_step_dispatch_until_resumed() -> None:
     assert asyncio.run(dispatcher.step_dispatch()) is operation
 
 
+def test_dispatcher_start_paused_blocks_step_dispatch_until_resumed() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a", start_paused=True)
+    operation = _operation()
+    dispatcher.add_operation(operation)
+
+    assert dispatcher.is_paused is True
+    assert asyncio.run(dispatcher.step_dispatch()) is None
+
+    dispatcher.resume_dispatcher_runtime()
+    assert dispatcher.is_paused is False
+    assert asyncio.run(dispatcher.step_dispatch()) is operation
+
+
 def test_dispatcher_cancel_queued_operation_sets_cancelled_state() -> None:
     seen_events: list[DispatcherEventType] = []
 

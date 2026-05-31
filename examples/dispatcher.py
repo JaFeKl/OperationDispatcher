@@ -19,6 +19,7 @@ class CallbackDrivenDispatcher:
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
+            start_paused=False,
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
             poll_interval_seconds=0.05,
@@ -109,4 +110,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

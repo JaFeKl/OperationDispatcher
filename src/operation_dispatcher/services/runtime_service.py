@@ -133,7 +133,7 @@ class DispatcherRuntimeService:
         )
         return operation
 
-    async def run(self) -> None:
+    async def run(self, start_paused: bool) -> None:
         if self.is_running:
             raise RuntimeError("operation dispatcher is already running")
 
@@ -142,6 +142,8 @@ class DispatcherRuntimeService:
         self._state_store.runtime_loop = asyncio.get_running_loop()
         self._state_store.wakeup_event = asyncio.Event()
         self._event_service.emit_event(EventType.OPERATION_DISPATCHER_STARTED)
+        if start_paused:
+            self._event_service.emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
         try:
             while not self._state_store.stop_requested:
                 try:

@@ -1,51 +1,54 @@
-import time
-
 import pytest
 
 pytest.importorskip("mcp.server.fastmcp")
 
-from operation_dispatcher import OperationDispatcher, OperationDispatcherMCPServer
+from operation_dispatcher import (
+    BasicMCPTool,
+    OperationDispatcher,
+    OperationDispatcherMCPServer,
+)
 
 
 def test_mcp_server_can_manage_dispatcher_runtime() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
-    mcp_server = OperationDispatcherMCPServer(
-        dispatcher,
-        manage_dispatcher_runtime=True,
-        runtime_startup_timeout_seconds=0.5,
-        runtime_stop_join_timeout_seconds=1.0,
-    )
+    mcp_server = OperationDispatcherMCPServer(dispatcher)
 
-    start_payload = mcp_server.start_dispatcher_runtime()
+    pause_payload = mcp_server.pause_dispatcher_runtime()
+    assert pause_payload["message"] == "operation dispatcher paused"
+    assert dispatcher.is_paused is True
 
-    deadline = time.time() + 0.8
-    while not dispatcher.is_running and time.time() < deadline:
-        time.sleep(0.01)
-
-    assert start_payload["state"]["runtime_managed_by"] == "mcp"
-    assert dispatcher.is_running is True
-
-    stop_payload = mcp_server.stop_dispatcher_runtime()
-
-    deadline = time.time() + 0.8
-    while dispatcher.is_running and time.time() < deadline:
-        time.sleep(0.01)
-
-    assert stop_payload["state"]["runtime_managed_by"] == "mcp"
-    assert dispatcher.is_running is False
+    resume_payload = mcp_server.resume_dispatcher_runtime()
+    assert resume_payload["message"] == "operation dispatcher resumed"
+    assert dispatcher.is_paused is False
 
 
 def test_mcp_server_can_be_configured_for_external_runtime_owner() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
+    mcp_server = OperationDispatcherMCPServer(dispatcher)
+
+    state_payload = mcp_server._dispatcher_state_payload()
+
+    assert "runtime_thread_alive" not in state_payload
+    assert "runtime_last_error" not in state_payload
+    assert "runtime_managed_by" not in state_payload
+
+
+def test_mcp_server_enables_all_basic_tools_by_default() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    mcp_server = OperationDispatcherMCPServer(dispatcher)
+
+    assert set(mcp_server.enabled_basic_tools) == set(BasicMCPTool)
+
+
+def test_mcp_server_accepts_custom_basic_tool_subset() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    selected_tools = [
+        BasicMCPTool.GET_DISPATCHER_STATE,
+        BasicMCPTool.PAUSE_OPERATION_DISPATCHER,
+    ]
     mcp_server = OperationDispatcherMCPServer(
         dispatcher,
-        manage_dispatcher_runtime=False,
+        basic_tools=selected_tools,
     )
 
-    start_payload = mcp_server.start_dispatcher_runtime()
-    stop_payload = mcp_server.stop_dispatcher_runtime()
-
-    assert start_payload["message"] == "dispatcher runtime is managed externally"
-    assert stop_payload["message"] == "dispatcher runtime is managed externally"
-    assert start_payload["state"]["runtime_managed_by"] == "external"
-    assert stop_payload["state"]["runtime_managed_by"] == "external"
+    assert mcp_server.enabled_basic_tools == tuple(selected_tools)

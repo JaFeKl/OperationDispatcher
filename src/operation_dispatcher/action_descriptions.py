@@ -46,10 +46,10 @@ OPENAPI_ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
         description="Starts the dispatcher so queued operations are automatically dispatched."
     ),
     "stop_operation_dispatcher": ActionDescription(
-        description="Stops the dispatcher’s runtime processing."
+        description="Stops the dispatcher. No new operations are being dispatched until restarted. Running operations are not affected and will continue to run until completion or cancellation."
     ),
     "pause_operation_dispatcher": ActionDescription(
-        description="Pauses the dispatcher. No new operations are being dispatched until resumed."
+        description="Pauses the dispatcher. No new operations are being dispatched until resumed. "
     ),
     "resume_operation_dispatcher": ActionDescription(
         description="Resumes a paused dispatcher, allowing it to dispatch queued operations again."

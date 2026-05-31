@@ -636,8 +636,6 @@ class OperationDispatcherOpenAPI:
         self.register_resume_operation_endpoint(app)
 
         self.register_get_operation_dispatcher_state_endpoint(app)
-        self.register_start_operation_dispatcher_endpoint(app)
-        self.register_stop_operation_dispatcher_endpoint(app)
         self.register_pause_operation_dispatcher_endpoint(app)
         self.register_resume_operation_dispatcher_endpoint(app)
 

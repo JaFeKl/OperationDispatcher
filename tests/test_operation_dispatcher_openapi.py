@@ -488,8 +488,10 @@ def test_openapi_register_default_endpoints_exposes_new_contract_routes() -> Non
     assert client.post("/operations", json=[]).status_code == 405
     assert client.post("/operations:batch", json=[]).status_code == 404
     assert client.get("/dispatcher").status_code == 200
-    assert client.post("/dispatcher/start").status_code in {202, 409}
-    assert client.post("/dispatcher/stop").status_code in {202, 409}
+    assert client.post("/dispatcher/start").status_code == 404
+    assert client.post("/dispatcher/stop").status_code == 404
+    assert client.post("/dispatcher/pause").status_code in {200, 409}
+    assert client.post("/dispatcher/resume").status_code in {200, 409}
 
     # Old contract routes should no longer be present.
     assert client.get("/operation_dispatcher/queue").status_code == 404
@@ -614,5 +616,7 @@ def test_openapi_specs_use_centralized_action_descriptions() -> None:
     assert set(specs) == set(OPENAPI_ACTION_DESCRIPTIONS)
 
     for action_name, spec in specs.items():
-        assert spec["description"] == OPENAPI_ACTION_DESCRIPTIONS[action_name].description
+        assert (
+            spec["description"] == OPENAPI_ACTION_DESCRIPTIONS[action_name].description
+        )
         assert spec["description"].strip() != ""
