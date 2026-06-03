@@ -1,6 +1,6 @@
 import pytest
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("fastmcp")
 
 from operation_dispatcher import (
     BasicMCPTool,

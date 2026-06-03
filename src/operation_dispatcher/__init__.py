@@ -94,7 +94,7 @@ def __getattr__(name: str):
     if name in _OPTIONAL_MCP_EXPORTS:
         raise ImportError(
             "MCP support is optional. Install with `operation-dispatcher[mcp]` "
-            "to use MCP exports."
+            "(standalone `fastmcp`) to use MCP exports."
         )
     if name in _OPTIONAL_OPENAPI_EXPORTS:
         raise ImportError(

@@ -8,6 +8,7 @@ from operation_dispatcher import (
     EventType,
     OperationDispatcher,
     OperationDispatcherMCPServer,
+    OperationDispatcherRuntimeController,
     Operation,
     SimulatedOperationRunner,
 )
@@ -23,6 +24,7 @@ class DemoDispatcherMCPService:
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
+            start_paused=True,
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
             logger=self._logger,
@@ -33,6 +35,9 @@ class DemoDispatcherMCPService:
             instructions="This is an example MCP server exposing an OperationDispatcher instance.",
             host=host,
             json_response=True,
+        )
+        self._runtime_controller = OperationDispatcherRuntimeController(
+            self.operation_dispatcher
         )
 
         self._simulated_runner = SimulatedOperationRunner(
@@ -101,9 +106,17 @@ class DemoDispatcherMCPService:
                 priority=0,
             )
         )
-        self.mcp_server.run(transport="sse")
+
+        runtime_payload, runtime_status = self._runtime_controller.start()
+        if runtime_status >= 400:
+            raise RuntimeError(
+                f"failed to start operation dispatcher runtime: {runtime_payload}"
+            )
+
+        self.mcp_server.run(transport="streamable-http")
 
     def shutdown(self) -> None:
+        self._runtime_controller.stop()
         self._simulated_runner.cancel()
 
 
