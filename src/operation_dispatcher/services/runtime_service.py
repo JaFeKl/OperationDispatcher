@@ -50,6 +50,7 @@ class DispatcherRuntimeService:
             uptime_seconds = (now - running_since).total_seconds()
 
         return OperationDispatcherState(
+            resource_id=self._state_store.dispatch_queue.resource_id,
             is_running=self.is_running,
             is_paused=self._state_store.is_paused,
             queue_size=len(self._state_store.dispatch_queue),

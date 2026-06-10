@@ -217,6 +217,7 @@ class RequestHandler:
     ) -> RequestDecision:
         resolved_meta_data = {} if meta_data is None else dict(meta_data)
         event = DispatchEvent(
+            resource_id=operation.resource_id,
             operation_id=operation.id,
             event_type=event_type,
             meta_data=resolved_meta_data,
@@ -257,6 +258,7 @@ class RequestHandler:
     ) -> RequestDecision:
         resolved_meta_data = {} if meta_data is None else dict(meta_data)
         event = DispatchEvent(
+            resource_id=operation.resource_id,
             operation_id=operation.id,
             event_type=event_type,
             meta_data=resolved_meta_data,

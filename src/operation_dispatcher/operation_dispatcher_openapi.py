@@ -1406,6 +1406,7 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
+                    "resource_id": {"type": "string"},
                     "operation_id": {
                         "oneOf": [
                             {"type": "string", "format": "uuid"},
@@ -1430,6 +1431,7 @@ class OperationDispatcherOpenAPI:
                 },
                 "required": [
                     "id",
+                    "resource_id",
                     "operation_id",
                     "event_type",
                     "created_at",
@@ -1462,6 +1464,7 @@ class OperationDispatcherOpenAPI:
             "OperationDispatcherState": {
                 "type": "object",
                 "properties": {
+                    "resource_id": {"type": "string"},
                     "is_running": {"type": "boolean"},
                     "is_paused": {"type": "boolean"},
                     "queue_size": {"type": "integer"},
@@ -1477,6 +1480,7 @@ class OperationDispatcherOpenAPI:
                     "runtime_last_error": {"type": "string"},
                 },
                 "required": [
+                    "resource_id",
                     "is_running",
                     "is_paused",
                     "queue_size",

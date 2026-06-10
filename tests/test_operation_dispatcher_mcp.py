@@ -28,6 +28,7 @@ def test_mcp_server_can_be_configured_for_external_runtime_owner() -> None:
 
     state_payload = mcp_server._dispatcher_state_payload()
 
+    assert state_payload["resource_id"] == "resource-a"
     assert "runtime_thread_alive" not in state_payload
     assert "runtime_last_error" not in state_payload
     assert "runtime_managed_by" not in state_payload

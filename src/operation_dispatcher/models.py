@@ -83,6 +83,7 @@ class DispatchEvent(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
+    resource_id: str
     operation_id: UUID | None = None
     event_type: EventType
     changes: list[ChangeRecord] = Field(default_factory=list)
@@ -177,7 +178,7 @@ class OperationDispatcherState(BaseModel):
     """
     A record of the current state of the operation dispatcher, including whether it is running or paused, the size of the queue, and details about the currently running operation if applicable.
     """
-
+    resource_id: str
     is_running: bool
     is_paused: bool
     queue_size: int

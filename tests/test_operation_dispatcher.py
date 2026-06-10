@@ -296,17 +296,28 @@ def test_dispatcher_lifecycle_methods_propagate_meta_data_to_events() -> None:
         event.event_type: event for event in dispatcher.get_event_history()
     }
 
+    assert (
+        event_by_type[DispatcherEventType.OPERATION_ADDED].resource_id == "resource-a"
+    )
     assert event_by_type[DispatcherEventType.OPERATION_ADDED].meta_data == add_meta
+    assert (
+        event_by_type[DispatcherEventType.OPERATION_UPDATED].resource_id == "resource-a"
+    )
     assert event_by_type[DispatcherEventType.OPERATION_UPDATED].meta_data == update_meta
 
     cancel_requested_event = event_by_type[
         DispatcherEventType.OPERATION_CANCEL_REQUESTED
     ]
+    assert cancel_requested_event.resource_id == "resource-a"
     assert cancel_requested_event.meta_data["source"] == "api"
     assert cancel_requested_event.meta_data["action"] == "cancel"
     assert cancel_requested_event.meta_data["reason"] == "manual"
     assert cancel_requested_event.meta_data["request_decision"]["accepted"] is True
 
+    assert (
+        event_by_type[DispatcherEventType.OPERATION_CANCELLED].resource_id
+        == "resource-a"
+    )
     assert (
         event_by_type[DispatcherEventType.OPERATION_CANCELLED].meta_data == cancel_meta
     )
@@ -332,12 +343,14 @@ def test_dispatcher_get_state_reports_runtime_and_queue_information() -> None:
 
     initial_state = dispatcher.get_state()
     assert isinstance(initial_state, OperationDispatcherState)
+    assert initial_state.resource_id == "resource-a"
     assert initial_state.is_running is False
     assert initial_state.queue_size == 1
     assert initial_state.current_operation is None
 
     asyncio.run(dispatcher.step_dispatch())
     running_state = dispatcher.get_state()
+    assert running_state.resource_id == "resource-a"
     assert running_state.current_operation is not None
     assert running_state.current_operation.id == operation.id
 

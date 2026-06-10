@@ -128,6 +128,7 @@ class BrowserEventVisualizer:
     ) -> None:
         event_details = {
             "id": str(event.id),
+            "resource_id": event.resource_id,
             "operation_id": (
                 str(event.operation_id) if event.operation_id is not None else None
             ),
@@ -141,6 +142,7 @@ class BrowserEventVisualizer:
 
         self.publish_event(
             event_type=event.event_type.name,
+            resource_id=event.resource_id,
             operation_id=event.operation_id,
             source=source,
             meta_data=event.meta_data,
@@ -152,6 +154,7 @@ class BrowserEventVisualizer:
     def publish_event(
         self,
         event_type: str,
+        resource_id: str | None = None,
         operation_id: UUID | str | None = None,
         source: str = "custom",
         meta_data: dict[str, Any] | None = None,
@@ -163,6 +166,7 @@ class BrowserEventVisualizer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event_type": event_type,
             "source": source,
+            "resource_id": resource_id,
             "operation_id": (
                 str(operation_id) if isinstance(operation_id, UUID) else operation_id
             ),
@@ -458,7 +462,7 @@ _INDEX_HTML = """<!doctype html>
       function eventKey(event) {
         const details = event.event_details || {};
         const id = details.id || '';
-        return `${id}|${event.timestamp}|${event.event_type}|${event.source}|${event.operation_id || ''}`;
+        return `${id}|${event.timestamp}|${event.event_type}|${event.source}|${event.resource_id || ''}|${event.operation_id || ''}`;
       }
 
       function toLocalTime(isoTs) {
@@ -480,8 +484,11 @@ _INDEX_HTML = """<!doctype html>
         item.className = 'event';
 
         const sourceClass = colorClassBySource[event.source] || 'source-custom';
+        const resourceId = event.resource_id || '';
         const operationId = event.operation_id || '';
-        const hasOperationContext = operationId !== '';
+        const metaParts = [];
+        if (resourceId !== '') metaParts.push(`resource_id=${resourceId}`);
+        if (operationId !== '') metaParts.push(`operation_id=${operationId}`);
         const eventDetails = event.event_details || {
           meta_data: event.meta_data || {},
           changes: event.changes || [],
@@ -502,7 +509,7 @@ _INDEX_HTML = """<!doctype html>
           detailsHtml += detailsBlock('Show operation details', operationDetails);
         }
 
-        const operationMeta = hasOperationContext ? ` · operation_id=${operationId}` : '';
+        const operationMeta = metaParts.length > 0 ? ` · ${metaParts.join(' · ')}` : '';
 
         item.innerHTML = `
           <div class="event-layout">

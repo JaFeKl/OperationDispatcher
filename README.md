@@ -91,7 +91,7 @@ def on_request(event: DispatchEvent) -> bool | None:
 def on_notification(event: DispatchEvent) -> None:
     # Observe all lifecycle and state change events.
     # Typical use cases: logging, persistence, event streaming.
-	print(f"{event.event_type} -> {event.operation_id}")
+	print(f"{event.event_type} -> resource={event.resource_id} operation={event.operation_id}")
 
 
 async def main():
@@ -122,7 +122,7 @@ asyncio.run(main())
 
 - `Operation`: Represents a queued operation with payload, priority, and scheduling metadata.
 - `OperationExecution`: Runtime state of a scheduled operation (running, paused, completed, failed).
-- `DispatchEvent`: Event emitted during lifecycle transitions and request/notification flows.
+- `DispatchEvent`: Event emitted during lifecycle transitions and request/notification flows, including the dispatcher `resource_id`.
 
 ## Dispatcher Runtime
 

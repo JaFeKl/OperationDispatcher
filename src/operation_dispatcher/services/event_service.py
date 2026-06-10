@@ -33,8 +33,14 @@ class DispatcherEventService:
             else []
         )
 
+        resource_id = (
+            operation.resource_id
+            if operation is not None
+            else self._state_store.dispatch_queue.resource_id
+        )
         operation_id = operation.id if operation is not None else None
         event = DispatchEvent(
+            resource_id=resource_id,
             operation_id=operation_id,
             event_type=event_type,
             changes=resolved_changes,

@@ -165,6 +165,7 @@ def test_openapi_get_operation_and_events() -> None:
     assert operation_payload["operation"]["state"] == ExecutionState.QUEUED.value
     assert events_status == 200
     assert len(events_payload) >= 1
+    assert all(event["resource_id"] == "resource-a" for event in events_payload)
 
 
 def test_openapi_get_current_operation_requires_running_operation() -> None:
@@ -255,6 +256,8 @@ def test_openapi_operation_cancel_accepts_optional_meta_data_and_termination_rea
     ]
     assert len(cancel_requested_events) == 1
     assert len(cancelled_events) == 1
+    assert cancel_requested_events[0]["resource_id"] == "resource-a"
+    assert cancelled_events[0]["resource_id"] == "resource-a"
     assert cancel_requested_events[0]["meta_data"]["source"] == "openapi"
     assert cancelled_events[0]["meta_data"] == {
         "source": "openapi",
@@ -310,6 +313,10 @@ def test_openapi_operation_pause_resume_accept_optional_meta_data() -> None:
         if event["event_type"] == "operation_resumed"
     ]
 
+    assert pause_requested_events[0]["resource_id"] == "resource-a"
+    assert pause_events[0]["resource_id"] == "resource-a"
+    assert resume_requested_events[0]["resource_id"] == "resource-a"
+    assert resume_events[0]["resource_id"] == "resource-a"
     assert pause_requested_events[0]["meta_data"]["source"] == "openapi"
     assert pause_events[0]["meta_data"] == {"source": "openapi", "action": "pause"}
     assert resume_requested_events[0]["meta_data"]["source"] == "openapi"
@@ -402,6 +409,7 @@ def test_openapi_dispatcher_runtime_endpoints() -> None:
         dispatcher_api.get_operation_dispatcher_state_response()
     )
     assert state_status == 200
+    assert state_payload["resource_id"] == "resource-a"
     assert "is_running" in state_payload
 
     stop_payload, stop_status = dispatcher_api.stop_operation_dispatcher_response()
@@ -532,12 +540,19 @@ def test_openapi_definitions_include_operation_status_model() -> None:
     assert "UpdateOperationItem" in definitions
     assert "LifecycleCommand" in definitions
     assert "CancelOperationCommand" in definitions
+    assert definitions["DispatchEvent"]["properties"]["resource_id"]["type"] == "string"
+    assert (
+        definitions["OperationDispatcherState"]["properties"]["resource_id"]["type"]
+        == "string"
+    )
     assert definitions["DispatchEvent"]["properties"]["meta_data"]["default"] == {}
     assert definitions["LifecycleCommand"]["properties"]["meta_data"]["default"] == {}
     assert (
         definitions["CancelOperationCommand"]["properties"]["meta_data"]["default"]
         == {}
     )
+    assert "resource_id" in definitions["DispatchEvent"]["required"]
+    assert "resource_id" in definitions["OperationDispatcherState"]["required"]
     assert (
         definitions["OperationStatus"]["properties"]["operation"]["$ref"]
         == "#/definitions/Operation"
