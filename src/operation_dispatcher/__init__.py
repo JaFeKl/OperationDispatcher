@@ -12,7 +12,7 @@ from .models import (
     TerminationReason,
 )
 from .dispatch_queue import DispatchQueue, SortDirection, SortField, SortRule
-from .operation_dispatcher import OperationDispatcher, OperationDispatcherReference
+from .operation_dispatcher import OperationDispatcher
 from .runtime_controller import OperationDispatcherRuntimeController
 from .services import (
     DispatcherHistoryService,
