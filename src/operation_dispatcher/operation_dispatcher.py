@@ -66,7 +66,16 @@ class OperationDispatcher:
         ) = None,
         on_notification_callback: Callable[[DispatchEvent], object] | None = None,
         on_history_callback: (
-            Callable[[datetime | None, datetime | None, int | None], History | None]
+            Callable[
+                [
+                    datetime | None,
+                    datetime | None,
+                    bool,
+                    int | None,
+                    History | None,
+                ],
+                History | None,
+            ]
             | None
         ) = None,
         logger: logging.Logger | None = None,

@@ -650,6 +650,7 @@ def test_dispatcher_history_callback_can_override_in_memory_history() -> None:
         to_time: datetime | None,
         resolve_operations: bool,
         limit: int | None,
+        in_memory_history: History | None,
     ) -> History:
         callback_calls.append((from_time, to_time, resolve_operations, limit))
 
@@ -709,6 +710,7 @@ def test_dispatcher_history_callback_none_falls_back_to_in_memory_history() -> N
         to_time: datetime | None,
         resolve_operations: bool,
         limit: int | None,
+        in_memory_history: History | None,
     ) -> None:
         return None
 

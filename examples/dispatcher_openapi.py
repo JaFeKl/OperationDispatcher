@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+from datetime import datetime
 import logging
 from uuid import UUID
 
@@ -11,6 +13,7 @@ from operation_dispatcher import (
     BrowserEventVisualizer,
     DispatchEvent,
     EventType,
+    History,
     OperationDispatcher,
     OperationDispatcherOpenAPI,
     Operation,
@@ -33,6 +36,7 @@ class DemoDispatcherService:
             resource_id="robot-1",
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
+            on_history_callback=self._on_history,
             logger=logger,
         )
 
@@ -84,6 +88,22 @@ class DemoDispatcherService:
             f"Received notification event {event.event_type} for operation_id {event.operation_id}"
         )
         self._visualizer.on_notification(event)
+
+    def _on_history(
+        self,
+        from_time: Optional[datetime],
+        to_time: Optional[datetime],
+        resolve_operations: bool,
+        limit: Optional[int],
+        in_memory_history: History | None,
+    ) -> History | None:
+        print(
+            "History callback called with "
+            f"from_time={from_time}, to_time={to_time}, "
+            f"resolve_operations={resolve_operations}, limit={limit}, "
+            f"in_memory_events={len(in_memory_history.events) if in_memory_history else 0}"
+        )
+        return None
 
     def _on_completed(self, operation_id: UUID) -> None:
         """Callback for simulated operation completion. This should be called when an operation is completed by the simulated runner."""

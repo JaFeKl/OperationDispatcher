@@ -21,7 +21,17 @@ class DispatcherStateStore:
     default_planned_duration: int | None
     updatable_fields: frozenset[str]
     on_history_callback: (
-        Callable[[datetime | None, datetime | None, int | None], History | None] | None
+        Callable[
+            [
+                datetime | None,
+                datetime | None,
+                bool,
+                int | None,
+                History | None,
+            ],
+            History | None,
+        ]
+        | None
     ) = None
 
     is_paused: bool = False

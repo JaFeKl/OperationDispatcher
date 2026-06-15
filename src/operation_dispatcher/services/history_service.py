@@ -24,10 +24,7 @@ class DispatcherHistoryService:
             return in_memory_history
 
         callback_result = self._state_store.on_history_callback(
-            from_time,
-            to_time,
-            resolve_operations,
-            limit,
+            from_time, to_time, resolve_operations, limit, in_memory_history
         )
         if callback_result is None:
             return in_memory_history
