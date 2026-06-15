@@ -2,11 +2,11 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from operation_dispatcher import (
+    DispatchEvent,
     EventType,
     ExecutionOutcome,
     ExecutionState,
     History,
-    HistoryRecord,
     Operation,
     OperationDispatcher,
     OperationDispatcherState,
@@ -197,7 +197,7 @@ def test_dispatcher_cancel_queued_operation_sets_cancelled_state() -> None:
     cancelled = dispatcher.cancel_operation(operation.id)
 
     assert cancelled is operation
-    assert operation.state is ExecutionState.CANCELLED
+    assert operation.state is ExecutionState.COMPLETED
     assert operation.outcome is ExecutionOutcome.CANCELLED
     assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
     assert operation.finish_time is not None
@@ -218,7 +218,7 @@ def test_dispatcher_cancel_current_operation_sets_cancelled_state() -> None:
 
     assert cancelled is operation
     assert dispatcher.current_operation is None
-    assert operation.state is ExecutionState.CANCELLED
+    assert operation.state is ExecutionState.COMPLETED
 
 
 def test_dispatcher_fail_operation_sets_failed_state() -> None:
@@ -230,7 +230,7 @@ def test_dispatcher_fail_operation_sets_failed_state() -> None:
     failed = dispatcher.fail_operation(operation.id)
 
     assert failed is operation
-    assert operation.state is ExecutionState.FAILED
+    assert operation.state is ExecutionState.COMPLETED
     assert operation.outcome is ExecutionOutcome.FAILURE
     assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
     assert operation.finish_time is not None
@@ -247,7 +247,7 @@ def test_dispatcher_cancel_operation_accepts_termination_reason_override() -> No
     )
 
     assert cancelled is operation
-    assert operation.state is ExecutionState.CANCELLED
+    assert operation.state is ExecutionState.COMPLETED
     assert operation.outcome is ExecutionOutcome.CANCELLED
     assert operation.termination_reason is TerminationReason.USER_REQUEST
 
@@ -264,7 +264,7 @@ def test_dispatcher_fail_operation_accepts_termination_reason_override() -> None
     )
 
     assert failed is operation
-    assert operation.state is ExecutionState.FAILED
+    assert operation.state is ExecutionState.COMPLETED
     assert operation.outcome is ExecutionOutcome.FAILURE
     assert operation.termination_reason is TerminationReason.EXTERNAL_ERROR
 
@@ -293,7 +293,7 @@ def test_dispatcher_lifecycle_methods_propagate_meta_data_to_events() -> None:
     dispatcher.cancel_operation(operation.id, meta_data=cancel_meta)
 
     event_by_type = {
-        event.event_type: event for event in dispatcher.get_event_history()
+        event.event_type: event for event in dispatcher.get_history().events
     }
 
     assert (
@@ -378,7 +378,7 @@ def test_dispatcher_emits_lifecycle_events() -> None:
     ]
 
 
-def test_dispatcher_records_runtime_lifecycle_events() -> None:
+def test_dispatcher_history_events_include_runtime_lifecycle_events() -> None:
     dispatcher = OperationDispatcher(
         resource_id="resource-a", poll_interval_seconds=0.01
     )
@@ -390,7 +390,7 @@ def test_dispatcher_records_runtime_lifecycle_events() -> None:
         await task
 
     asyncio.run(run_dispatcher())
-    event_types = [event.event_type for event in dispatcher.get_event_history()]
+    event_types = [event.event_type for event in dispatcher.get_history().events]
 
     assert DispatcherEventType.OPERATION_DISPATCHER_STARTED in event_types
     assert DispatcherEventType.OPERATION_DISPATCHER_STOPPED in event_types
@@ -596,7 +596,7 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
     assert executed is operation
     request_events = [
         event
-        for event in dispatcher.get_event_history()
+        for event in dispatcher.get_history().events
         if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED
     ]
     assert len(request_events) == 1
@@ -606,53 +606,72 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
     assert request_event.meta_data["request_decision"]["data"] == {"rule": "start_ok"}
 
 
-def test_dispatcher_history_records_include_operation_and_events() -> None:
+def test_dispatcher_history_events_and_resolved_operations_include_operation() -> None:
     dispatcher = OperationDispatcher(resource_id="resource-a")
     operation = _operation()
     dispatcher.add_operation(operation)
     asyncio.run(dispatcher.step_dispatch())
     dispatcher.complete_operation(operation.id)
 
-    history = dispatcher.get_history(limit=1)
+    history = dispatcher.get_history(limit=50)
 
     assert isinstance(history, History)
-    assert history.num_records == 1
-    assert len(history.records) == 1
-    history_record = history.records[0]
-    assert isinstance(history_record, HistoryRecord)
-    assert history_record.operation.id == operation.id
-    assert history_record.operation.state is ExecutionState.COMPLETED
+    assert len(history.events) >= 1
+    assert any(
+        event.event_type is DispatcherEventType.OPERATION_COMPLETED
+        and event.operation_id == operation.id
+        for event in history.events
+    )
+    assert history.operations is None
+
+    resolved_history = dispatcher.get_history(limit=50, resolve_operations=True)
+    assert resolved_history.operations is not None
+    resolved_operations = {
+        resolved_operation.id: resolved_operation
+        for resolved_operation in resolved_history.operations
+    }
+    assert operation.id in resolved_operations
+    assert resolved_operations[operation.id].state is ExecutionState.COMPLETED
     assert any(
         event.event_type is DispatcherEventType.OPERATION_STARTED
-        for event in history_record.events
+        for event in dispatcher.get_history(limit=50).events
     )
     assert any(
         event.event_type is DispatcherEventType.OPERATION_COMPLETED
-        for event in history_record.events
+        for event in dispatcher.get_history(limit=50).events
     )
 
 
-def test_dispatcher_history_callback_can_merge_external_history() -> None:
-    callback_calls: list[tuple[int | None, History]] = []
+def test_dispatcher_history_callback_can_override_in_memory_history() -> None:
+    callback_calls: list[tuple[datetime | None, datetime | None, bool, int | None]] = []
 
-    def history_callback(limit: int | None, in_memory_history: History) -> History:
-        callback_calls.append((limit, in_memory_history))
+    def history_callback(
+        from_time: datetime | None,
+        to_time: datetime | None,
+        resolve_operations: bool,
+        limit: int | None,
+    ) -> History:
+        callback_calls.append((from_time, to_time, resolve_operations, limit))
 
-        external_record = HistoryRecord(
-            operation=Operation(
-                payload={"task": "external"},
-                resource_id="resource-a",
-                state=ExecutionState.COMPLETED,
-                outcome=ExecutionOutcome.SUCCESS,
-                start_time=datetime.now(timezone.utc),
-            ),
-            events=[],
+        external_operation = Operation(
+            payload={"task": "external"},
+            resource_id="resource-a",
+            state=ExecutionState.COMPLETED,
+            outcome=ExecutionOutcome.SUCCESS,
+            start_time=datetime.now(timezone.utc),
+            finish_time=datetime.now(timezone.utc),
         )
-
-        merged_records = [external_record, *in_memory_history.records]
+        external_event = DispatchEvent(
+            resource_id="resource-a",
+            operation_id=external_operation.id,
+            event_type=DispatcherEventType.OPERATION_COMPLETED,
+            created_at=datetime.now(timezone.utc),
+        )
         return History(
-            num_records=len(merged_records),
-            records=merged_records,
+            resource_id="resource-a",
+            window={"start": from_time, "end": to_time},
+            events=[external_event],
+            operations=[external_operation] if resolve_operations else None,
         )
 
     dispatcher = OperationDispatcher(
@@ -667,15 +686,30 @@ def test_dispatcher_history_callback_can_merge_external_history() -> None:
     history = dispatcher.get_history(limit=1)
 
     assert len(callback_calls) == 1
-    callback_limit, callback_in_memory_history = callback_calls[0]
+    (
+        callback_from_time,
+        callback_to_time,
+        callback_resolve_operations,
+        callback_limit,
+    ) = callback_calls[0]
+    assert callback_from_time is None
+    assert callback_to_time is None
+    assert callback_resolve_operations is False
     assert callback_limit == 1
-    assert callback_in_memory_history.num_records == 1
-    assert history.num_records == 2
-    assert history.records[0].operation.payload["task"] == "external"
+    assert history.operations is None
+
+    resolved_history = dispatcher.get_history(limit=1, resolve_operations=True)
+    assert resolved_history.operations is not None
+    assert resolved_history.operations[0].payload["task"] == "external"
 
 
 def test_dispatcher_history_callback_none_falls_back_to_in_memory_history() -> None:
-    def history_callback(limit: int | None, in_memory_history: History) -> None:
+    def history_callback(
+        from_time: datetime | None,
+        to_time: datetime | None,
+        resolve_operations: bool,
+        limit: int | None,
+    ) -> None:
         return None
 
     dispatcher = OperationDispatcher(
@@ -687,10 +721,13 @@ def test_dispatcher_history_callback_none_falls_back_to_in_memory_history() -> N
     asyncio.run(dispatcher.step_dispatch())
     dispatcher.complete_operation(operation.id)
 
-    history = dispatcher.get_history(limit=1)
+    history = dispatcher.get_history(limit=50)
 
-    assert history.num_records == 1
-    assert len(history.records) == 1
+    assert len(history.events) >= 1
+    assert any(
+        event.event_type is DispatcherEventType.OPERATION_COMPLETED
+        for event in history.events
+    )
 
 
 def test_dispatcher_denied_event_includes_structured_reason_metadata() -> None:
@@ -808,7 +845,7 @@ def test_dispatcher_update_operation_emits_operation_updated_with_changes() -> N
 
     updated_events = [
         event
-        for event in dispatcher.get_event_history()
+        for event in dispatcher.get_history().events
         if event.event_type is DispatcherEventType.OPERATION_UPDATED
     ]
     assert len(updated_events) == 1

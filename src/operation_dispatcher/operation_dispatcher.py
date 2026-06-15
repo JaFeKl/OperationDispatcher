@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
 import logging
-import queue
-import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -17,7 +13,6 @@ from operation_dispatcher.models import (
     ExecutionOutcome,
     ExecutionState,
     History,
-    HistoryRecord,
     OperationDispatcherState,
     Operation,
     TerminationReason,
@@ -71,10 +66,7 @@ class OperationDispatcher:
         ) = None,
         on_notification_callback: Callable[[DispatchEvent], object] | None = None,
         on_history_callback: (
-            Callable[
-                [int | None, History],
-                History | list[HistoryRecord] | None,
-            ]
+            Callable[[datetime | None, datetime | None, int | None], History | None]
             | None
         ) = None,
         logger: logging.Logger | None = None,
@@ -139,11 +131,7 @@ class OperationDispatcher:
             on_request_callback=on_request_callback,
             request_retry_policy=request_retry_policy,
             request_event_timeout_seconds=request_event_timeout_seconds,
-            append_event_history=self._event_service.append_event_history,
-            append_operation_event=self._event_service.append_operation_event,
             emit_event=self._event_service.emit_event,
-            log_event=self._event_service.log_event,
-            notify_wakeup=self._runtime_service.notify_wakeup,
             pause=self._runtime_service.pause_dispatcher_runtime,
         )
 
@@ -275,14 +263,19 @@ class OperationDispatcher:
 
     # History
 
-    def get_event_history(self, limit: int | None = None) -> list[DispatchEvent]:
-        return self._history_service.get_event_history(limit=limit)
-
     def get_history(
         self,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+        resolve_operations: bool = False,
         limit: int | None = None,
     ) -> History:
-        return self._history_service.get_history(limit=limit)
+        return self._history_service.get_history(
+            from_time=from_time,
+            to_time=to_time,
+            resolve_operations=resolve_operations,
+            limit=limit,
+        )
 
     @classmethod
     def _resolve_updatable_fields(

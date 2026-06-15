@@ -64,7 +64,6 @@ class OperationLifecycleService:
             operation.planned_duration = self._state_store.default_planned_duration
 
         self._state_store.dispatch_queue.add(operation)
-        self._state_store.events_by_operation_id.setdefault(operation.id, [])
         self._event_service.emit_event(
             EventType.OPERATION_ADDED,
             operation=operation,
@@ -136,7 +135,7 @@ class OperationLifecycleService:
         old_operation = operation.model_copy(deep=True)
         self._transition_operation_state(
             operation,
-            state=ExecutionState.FAILED,
+            state=ExecutionState.COMPLETED,
             outcome=ExecutionOutcome.FAILURE,
             termination_reason=termination_reason,
             set_finish_time=True,
@@ -283,7 +282,7 @@ class OperationLifecycleService:
         old_operation = cancelled_operation.model_copy(deep=True)
         self._transition_operation_state(
             cancelled_operation,
-            state=ExecutionState.CANCELLED,
+            state=ExecutionState.COMPLETED,
             outcome=ExecutionOutcome.CANCELLED,
             termination_reason=termination_reason,
             set_finish_time=True,

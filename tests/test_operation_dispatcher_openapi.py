@@ -116,17 +116,15 @@ def test_openapi_list_operations_excludes_terminal_states_and_history_contains_t
     dispatcher.complete_operation(operation.id)
 
     listed_payload, listed_status = dispatcher_api.list_operations_response(state=None)
-    history_payload, history_status = dispatcher_api.get_operations_history_response(
-        limit=50
-    )
+    history_payload, history_status = dispatcher_api.get_history_response(limit=50)
 
     assert listed_status == 200
     assert all(item["operation"]["id"] != str(operation.id) for item in listed_payload)
 
     assert history_status == 200
     assert any(
-        record["operation"]["id"] == str(operation.id)
-        for record in history_payload["records"]
+        resolved_operation["id"] == str(operation.id)
+        for resolved_operation in (history_payload["operations"] or [])
     )
 
 
@@ -211,7 +209,7 @@ def test_openapi_operation_pause_resume_cancel_commands() -> None:
         str(operation.id)
     )
     assert cancelled_status == 200
-    assert cancelled_payload["operation"]["state"] == ExecutionState.CANCELLED.value
+    assert cancelled_payload["operation"]["state"] == ExecutionState.COMPLETED.value
 
 
 def test_openapi_operation_cancel_accepts_optional_meta_data_and_termination_reason() -> (
@@ -233,7 +231,7 @@ def test_openapi_operation_cancel_accepts_optional_meta_data_and_termination_rea
     )
 
     assert cancelled_status == 200
-    assert cancelled_payload["operation"]["state"] == ExecutionState.CANCELLED.value
+    assert cancelled_payload["operation"]["state"] == ExecutionState.COMPLETED.value
     assert (
         cancelled_payload["operation"]["termination_reason"]
         == TerminationReason.USER_REQUEST.value
@@ -435,7 +433,7 @@ def test_openapi_dispatcher_pause_resume_do_not_trigger_operation_requests() -> 
     assert resume_status == 200
     assert resume_payload["state"]["is_paused"] is False
 
-    event_types = [event.event_type.value for event in dispatcher.get_event_history()]
+    event_types = [event.event_type.value for event in dispatcher.get_history().events]
     assert "operation_dispatcher_paused" in event_types
     assert "operation_dispatcher_resumed" in event_types
     assert "operation_pause_requested" not in event_types
@@ -461,7 +459,7 @@ def test_openapi_dispatcher_stop_does_not_trigger_operation_cancel_request() -> 
     assert stop_status == 202
     assert stop_payload["state"]["is_running"] is False
 
-    event_types = [event.event_type.value for event in dispatcher.get_event_history()]
+    event_types = [event.event_type.value for event in dispatcher.get_history().events]
     assert "operation_dispatcher_stopped" in event_types
     assert "operation_cancel_requested" not in event_types
 
@@ -525,7 +523,7 @@ def test_openapi_cancel_endpoint_accepts_path_operation_id_kwarg() -> None:
     response_payload = response.get_json()
     assert response_payload is not None
     assert response_payload["operation"]["id"] == str(operation.id)
-    assert response_payload["operation"]["state"] == ExecutionState.CANCELLED.value
+    assert response_payload["operation"]["state"] == ExecutionState.COMPLETED.value
 
 
 def test_openapi_definitions_include_operation_status_model() -> None:
@@ -603,9 +601,7 @@ def test_openapi_specs_use_centralized_action_descriptions() -> None:
         "get_operation_events": (
             OperationDispatcherOpenAPI.get_operation_events_openapi_spec()
         ),
-        "get_operations_history": (
-            OperationDispatcherOpenAPI.get_operations_history_openapi_spec()
-        ),
+        "get_history": (OperationDispatcherOpenAPI.get_history_openapi_spec()),
         "add_operation": OperationDispatcherOpenAPI.add_operation_openapi_spec(),
         "cancel_operation": OperationDispatcherOpenAPI.cancel_operation_openapi_spec(),
         "update_operation": OperationDispatcherOpenAPI.update_operation_openapi_spec(),

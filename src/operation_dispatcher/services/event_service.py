@@ -25,6 +25,7 @@ class DispatcherEventService:
         operation: Operation | None = None,
         meta_data: dict[str, Any] | None = None,
         old_operation: Operation | None = None,
+        notify: bool = True,
     ) -> DispatchEvent:
         resolved_meta_data = {} if meta_data is None else dict(meta_data)
         resolved_changes = (
@@ -47,11 +48,9 @@ class DispatcherEventService:
             meta_data=resolved_meta_data,
         )
         self.append_event_history(event)
-        if operation_id is not None:
-            self.append_operation_event(operation_id, event)
         self.log_event(event)
         notification_handler = self._state_store.notification_handler
-        if notification_handler is not None:
+        if notify and notification_handler is not None:
             notification_handler.notify(event)
         self._notify_wakeup()
         return event
@@ -62,11 +61,6 @@ class DispatcherEventService:
             self._state_store.event_history = self._state_store.event_history[
                 -self._state_store.event_history_limit :
             ]
-
-    def append_operation_event(self, operation_id: UUID, event: DispatchEvent) -> None:
-        self._state_store.events_by_operation_id.setdefault(operation_id, []).append(
-            event
-        )
 
     def log_event(self, event: DispatchEvent) -> None:
         logger = self._state_store.logger

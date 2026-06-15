@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -8,12 +9,7 @@ from flask import jsonify, request
 from flasgger import swag_from
 from pydantic import ValidationError
 
-from .models import (
-    EventType,
-    ExecutionState,
-    Operation,
-    TerminationReason,
-)
+from .models import EventType, ExecutionState, Operation, TerminationReason, History
 from .action_descriptions import OPENAPI_ACTION_DESCRIPTIONS
 from .operation_dispatcher import OperationDispatcher
 from .runtime_controller import OperationDispatcherRuntimeController
@@ -183,14 +179,17 @@ class OperationDispatcherOpenAPI:
         operation_uuid = UUID(operation_status_payload["operation"]["id"])
         events = [
             event.model_dump(mode="json")
-            for event in self._operation_dispatcher.get_event_history()
+            for event in self._operation_dispatcher._state_store.event_history
             if event.operation_id == operation_uuid
         ]
         return events, 200
 
-    def get_operations_history_response(
+    def get_history_response(
         self,
-        limit: int | None,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+        resolve_operations: bool = True,
+        limit: int | None = None,
     ) -> tuple[dict[str, Any], int]:
         resolved_limit = 50 if limit is None else limit
         if resolved_limit < 1:
@@ -206,7 +205,9 @@ class OperationDispatcherOpenAPI:
                 status_code=400,
             )
 
-        history = self._operation_dispatcher.get_history(limit=resolved_limit)
+        history = self._operation_dispatcher.get_history(
+            from_time, to_time, resolve_operations, limit=resolved_limit
+        )
         return history.model_dump(mode="json"), 200
 
     def add_operation_response(
@@ -626,7 +627,7 @@ class OperationDispatcherOpenAPI:
     def register_default_endpoints(self, app: Any) -> None:
         self.register_list_operations_endpoint(app)
         self.register_get_current_operation_endpoint(app)
-        self.register_get_operations_history_endpoint(app)
+        self.register_get_history_endpoint(app)
         self.register_get_operation_endpoint(app)
         self.register_get_operation_events_endpoint(app)
         self.register_add_operation_endpoint(app)
@@ -693,13 +694,46 @@ class OperationDispatcherOpenAPI:
             response_handler=self.get_current_operation_response,
         )
 
-    def register_get_operations_history_endpoint(
+    def register_get_history_endpoint(
         self,
         app: Any,
         route: str = "/operations/history",
-        endpoint_name: str = "get_operations_history",
+        endpoint_name: str = "get_history",
     ) -> None:
         def response_handler() -> tuple[dict[str, Any], int]:
+            def parse_datetime_query_param(
+                value: str,
+                *,
+                param_name: str,
+            ) -> tuple[datetime | None, dict[str, Any] | None, int]:
+                try:
+                    normalized_value = value.replace("Z", "+00:00")
+                    return datetime.fromisoformat(normalized_value), None, 200
+                except ValueError:
+                    error_payload, status_code = self._error_response(
+                        message=f"{param_name} must be a valid ISO-8601 datetime",
+                        code=f"invalid_{param_name}",
+                        status_code=400,
+                    )
+                    return None, error_payload, status_code
+
+            def parse_bool_query_param(
+                value: str,
+                *,
+                param_name: str,
+            ) -> tuple[bool | None, dict[str, Any] | None, int]:
+                normalized = value.strip().lower()
+                if normalized in {"1", "true", "yes", "on"}:
+                    return True, None, 200
+                if normalized in {"0", "false", "no", "off"}:
+                    return False, None, 200
+                error_payload, status_code = self._error_response(
+                    message=f"{param_name} must be a boolean",
+                    code=f"invalid_{param_name}",
+                    status_code=400,
+                )
+                return None, error_payload, status_code
+
             limit_value = request.args.get("limit")
             if limit_value is None:
                 parsed_limit = None
@@ -713,14 +747,67 @@ class OperationDispatcherOpenAPI:
                         status_code=400,
                     )
 
-            return self.get_operations_history_response(parsed_limit)
+            from_time: datetime | None = None
+            from_time_value = request.args.get("from_time")
+            if from_time_value is not None:
+                parsed_from_time, from_time_error, from_time_status = (
+                    parse_datetime_query_param(
+                        from_time_value,
+                        param_name="from_time",
+                    )
+                )
+                if from_time_error is not None:
+                    return from_time_error, from_time_status
+                from_time = parsed_from_time
+
+            to_time: datetime | None = None
+            to_time_value = request.args.get("to_time")
+            if to_time_value is not None:
+                parsed_to_time, to_time_error, to_time_status = (
+                    parse_datetime_query_param(
+                        to_time_value,
+                        param_name="to_time",
+                    )
+                )
+                if to_time_error is not None:
+                    return to_time_error, to_time_status
+                to_time = parsed_to_time
+
+            if from_time is not None and to_time is not None and from_time > to_time:
+                return self._error_response(
+                    message="from_time must be less than or equal to to_time",
+                    code="invalid_time_range",
+                    status_code=400,
+                )
+
+            resolve_operations = True
+            resolve_operations_value = request.args.get("resolve_operations")
+            if resolve_operations_value is not None:
+                (
+                    parsed_resolve_operations,
+                    resolve_operations_error,
+                    resolve_operations_status,
+                ) = parse_bool_query_param(
+                    resolve_operations_value,
+                    param_name="resolve_operations",
+                )
+                if resolve_operations_error is not None:
+                    return resolve_operations_error, resolve_operations_status
+                resolve_operations = bool(parsed_resolve_operations)
+
+            return self.get_history_response(
+                from_time=from_time,
+                to_time=to_time,
+                resolve_operations=resolve_operations,
+                limit=parsed_limit,
+            )
 
         self._register_json_endpoint(
             app,
             method="GET",
             route=route,
             endpoint_name=endpoint_name,
-            openapi_spec=self.get_operations_history_openapi_spec(),
+            openapi_spec=self.get_history_openapi_spec(),
             response_handler=response_handler,
         )
 
@@ -1028,14 +1115,33 @@ class OperationDispatcherOpenAPI:
         }
 
     @staticmethod
-    def get_operations_history_openapi_spec() -> dict[str, Any]:
+    def get_history_openapi_spec() -> dict[str, Any]:
         return {
             "tags": ["Operations"],
-            "description": OPENAPI_ACTION_DESCRIPTIONS[
-                "get_operations_history"
-            ].description,
+            "description": OPENAPI_ACTION_DESCRIPTIONS["get_history"].description,
             "produces": ["application/json"],
             "parameters": [
+                {
+                    "name": "from_time",
+                    "in": "query",
+                    "required": False,
+                    "type": "string",
+                    "format": "date-time",
+                },
+                {
+                    "name": "to_time",
+                    "in": "query",
+                    "required": False,
+                    "type": "string",
+                    "format": "date-time",
+                },
+                {
+                    "name": "resolve_operations",
+                    "in": "query",
+                    "required": False,
+                    "type": "boolean",
+                    "default": True,
+                },
                 {
                     "name": "limit",
                     "in": "query",
@@ -1044,12 +1150,12 @@ class OperationDispatcherOpenAPI:
                     "default": 50,
                     "minimum": 1,
                     "maximum": 1000,
-                }
+                },
             ],
             "responses": {
                 200: {
-                    "description": "Most recent completed operations.",
-                    "schema": {"$ref": "#/definitions/OperationHistory"},
+                    "description": "History of events and operations in the given time window.",
+                    "schema": {"$ref": "#/definitions/History"},
                 },
                 400: {"schema": {"$ref": "#/definitions/ErrorResponse"}},
             },
@@ -1439,27 +1545,45 @@ class OperationDispatcherOpenAPI:
                     "meta_data",
                 ],
             },
-            "HistoryRecord": {
+            "TimeWindow": {
                 "type": "object",
                 "properties": {
-                    "operation": {"$ref": "#/definitions/Operation"},
+                    "start": {
+                        "oneOf": [
+                            {"type": "string", "format": "date-time"},
+                            {"type": "null"},
+                        ]
+                    },
+                    "end": {
+                        "oneOf": [
+                            {"type": "string", "format": "date-time"},
+                            {"type": "null"},
+                        ]
+                    },
+                },
+                "required": ["start", "end"],
+            },
+            "History": {
+                "type": "object",
+                "properties": {
+                    "resource_id": {"type": "string"},
+                    "window": {"$ref": "#/definitions/TimeWindow"},
                     "events": {
                         "type": "array",
                         "items": {"$ref": "#/definitions/DispatchEvent"},
                     },
-                },
-                "required": ["operation", "events"],
-            },
-            "OperationHistory": {
-                "type": "object",
-                "properties": {
-                    "num_records": {"type": "integer"},
-                    "records": {
-                        "type": "array",
-                        "items": {"$ref": "#/definitions/HistoryRecord"},
+                    "operations": {
+                        "oneOf": [
+                            {
+                                "type": "array",
+                                "items": {"$ref": "#/definitions/Operation"},
+                            },
+                            {"type": "null"},
+                        ]
                     },
+                    "created_at": {"type": "string", "format": "date-time"},
                 },
-                "required": ["num_records", "records"],
+                "required": ["resource_id", "window", "events", "created_at"],
             },
             "OperationDispatcherState": {
                 "type": "object",

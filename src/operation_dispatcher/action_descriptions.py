@@ -21,8 +21,8 @@ OPENAPI_ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
     "get_operation_events": ActionDescription(
         description="Returns the ordered lifecycle event history emitted for the specified operation."
     ),
-    "get_operations_history": ActionDescription(
-        description="Returns recently completed operations together with their recorded lifecycle events."
+    "get_history": ActionDescription(
+        description="Returns event and operation history matching the requested time window."
     ),
     "add_operation": ActionDescription(
         description="Adds one or more operations to the dispatcher queue and emits operation-added lifecycle events for accepted items."

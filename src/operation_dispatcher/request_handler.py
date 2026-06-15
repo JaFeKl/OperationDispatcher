@@ -31,28 +31,13 @@ class RequestHandler:
         on_request_callback: Callable[[DispatchEvent], object] | None,
         request_retry_policy: RetryPolicy,
         request_event_timeout_seconds: float,
-        append_event_history: Callable[[DispatchEvent], None],
-        append_operation_event: Callable[[UUID, DispatchEvent], None],
-        emit_event: Callable[
-            [
-                EventType,
-                Operation | None,
-                dict[str, Any] | None,
-            ],
-            object,
-        ],
-        log_event: Callable[[DispatchEvent], None],
-        notify_wakeup: Callable[[], None],
+        emit_event: Callable[..., object],
         pause: Callable[[], None],
     ) -> None:
         self._on_request_callback = on_request_callback
         self._request_retry_policy = request_retry_policy
         self._request_event_timeout_seconds = request_event_timeout_seconds
-        self._append_event_history = append_event_history
-        self._append_operation_event = append_operation_event
         self._emit_event = emit_event
-        self._log_event = log_event
-        self._notify_wakeup = notify_wakeup
         self._pause = pause
 
     async def request_operation_start(self, operation: Operation) -> bool:
@@ -216,18 +201,19 @@ class RequestHandler:
         meta_data: dict[str, Any] | None = None,
     ) -> RequestDecision:
         resolved_meta_data = {} if meta_data is None else dict(meta_data)
-        event = DispatchEvent(
+        callback_event = DispatchEvent(
             resource_id=operation.resource_id,
             operation_id=operation.id,
             event_type=event_type,
             meta_data=resolved_meta_data,
         )
-        self._append_event_history(event)
 
         decision = RequestDecision(accepted=True)
         if self._on_request_callback is not None:
             try:
-                callback_result = await self._invoke_request_callback_async(event)
+                callback_result = await self._invoke_request_callback_async(
+                    callback_event
+                )
                 decision = self._resolve_request_decision(callback_result)
             except Exception as error:
                 decision = RequestDecision(
@@ -236,18 +222,16 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        event.meta_data = {
+        request_event_meta_data = {
             **resolved_meta_data,
             **self._decision_event_meta_data(decision),
         }
-        self._record_request_event(
-            operation_id=operation.id,
-            event=event,
-            append_operation_event=self._append_operation_event,
+        self._emit_event(
+            event_type,
+            operation,
+            request_event_meta_data,
+            notify=False,
         )
-
-        self._log_event(event)
-        self._notify_wakeup()
         return decision
 
     def _request_operation_event_sync(
@@ -257,18 +241,17 @@ class RequestHandler:
         meta_data: dict[str, Any] | None = None,
     ) -> RequestDecision:
         resolved_meta_data = {} if meta_data is None else dict(meta_data)
-        event = DispatchEvent(
+        callback_event = DispatchEvent(
             resource_id=operation.resource_id,
             operation_id=operation.id,
             event_type=event_type,
             meta_data=resolved_meta_data,
         )
-        self._append_event_history(event)
 
         decision = RequestDecision(accepted=True)
         if self._on_request_callback is not None:
             try:
-                callback_result = self._invoke_request_callback_sync(event)
+                callback_result = self._invoke_request_callback_sync(callback_event)
                 decision = self._resolve_request_decision(callback_result)
             except Exception as error:
                 decision = RequestDecision(
@@ -277,18 +260,16 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        event.meta_data = {
+        request_event_meta_data = {
             **resolved_meta_data,
             **self._decision_event_meta_data(decision),
         }
-        self._record_request_event(
-            operation_id=operation.id,
-            event=event,
-            append_operation_event=self._append_operation_event,
+        self._emit_event(
+            event_type,
+            operation,
+            request_event_meta_data,
+            notify=False,
         )
-
-        self._log_event(event)
-        self._notify_wakeup()
         return decision
 
     @staticmethod
@@ -349,14 +330,6 @@ class RequestHandler:
                 "data": decision.data or {},
             }
         }
-
-    @staticmethod
-    def _record_request_event(
-        operation_id: UUID,
-        event: DispatchEvent,
-        append_operation_event: Callable[[UUID, DispatchEvent], None],
-    ) -> None:
-        append_operation_event(operation_id, event)
 
     async def _invoke_request_callback_async(self, event: DispatchEvent) -> object:
         if self._on_request_callback is None:

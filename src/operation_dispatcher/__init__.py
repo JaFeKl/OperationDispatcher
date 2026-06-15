@@ -5,7 +5,6 @@ from .models import (
     ExecutionState,
     ExecutionOutcome,
     History,
-    HistoryRecord,
     OperationDependency,
     OperationDispatcherState,
     Operation,
@@ -21,7 +20,12 @@ from .services import (
     OperationLifecycleService,
 )
 from .utils.simulated_operation_runner import SimulatedOperationRunner
-from .visualization import BrowserEventVisualizer
+from .visualization import (
+    BrowserEventVisualizer,
+    build_history_gantt_figure,
+    show_history_gantt,
+)
+from .diagnostics.history_analyzer import HistoryAnalyzer
 
 try:
     from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
@@ -54,7 +58,6 @@ __all__ = [
     "Operation",
     "OperationDependency",
     "History",
-    "HistoryRecord",
     "ExecutionState",
     "ExecutionOutcome",
     "TerminationReason",
@@ -74,6 +77,9 @@ __all__ = [
     "DispatcherHistoryService",
     "SimulatedOperationRunner",
     "BrowserEventVisualizer",
+    "build_history_gantt_figure",
+    "show_history_gantt",
+    "HistoryAnalyzer",
 ]
 
 if "OperationDispatcherOpenAPI" in globals():

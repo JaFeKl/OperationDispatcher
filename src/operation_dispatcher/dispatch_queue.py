@@ -38,8 +38,6 @@ class DispatchQueue:
     Invariants:
     - Only one operation can be active at a time.
     - One operation can only be in one bucket at a time.
-    - Queue type is fixed after first insertion: all operations are either
-      plain (no `time_window`) or windowed (with `time_window`).
     """
 
     def __init__(

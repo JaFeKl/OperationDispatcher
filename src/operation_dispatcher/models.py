@@ -20,8 +20,6 @@ class ExecutionState(str, Enum):
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
     COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
 
 
 class ExecutionOutcome(str, Enum):
@@ -178,6 +176,7 @@ class OperationDispatcherState(BaseModel):
     """
     A record of the current state of the operation dispatcher, including whether it is running or paused, the size of the queue, and details about the currently running operation if applicable.
     """
+
     resource_id: str
     is_running: bool
     is_paused: bool
@@ -187,13 +186,17 @@ class OperationDispatcherState(BaseModel):
     uptime_seconds: float | None = None
 
 
-class HistoryRecord(BaseModel):
-    """
-    A record of a completed operation, including its final state and outcome, as well as any events that occurred during its execution.
-    """
+class TimeWindow(BaseModel):
+    start: datetime | None = None
+    end: datetime | None = None
 
-    operation: Operation
-    events: list[DispatchEvent] = Field(default_factory=list)
+    @model_validator(mode="after")
+    def validate_window(self) -> TimeWindow:
+        self.start = _normalize_to_utc(self.start)  # type: ignore[assignment]
+        self.end = _normalize_to_utc(self.end)  # type: ignore[assignment]
+        if self.start is not None and self.end is not None and self.end < self.start:
+            raise ValueError("end time must be after start time")
+        return self
 
 
 class History(BaseModel):
@@ -201,5 +204,82 @@ class History(BaseModel):
     A record of completed operations, including their final state and outcome, as well as any events that occurred during their execution.
     """
 
-    num_records: int = 0
-    records: list[HistoryRecord] = Field(default_factory=list)
+    resource_id: str
+    window: TimeWindow
+    events: list[DispatchEvent]
+    operations: list[Operation] | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def validate_operations(self) -> History:
+        self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
+        event_operation_ids = set(
+            event.operation_id
+            for event in self.events
+            if event.operation_id is not None
+        )
+        if self.operations is not None:
+            operation_ids = set()
+            for operation in self.operations:
+                if operation.id not in event_operation_ids:
+                    raise ValueError(
+                        f"operation with id {operation.id} is not referenced by any event"
+                    )
+                if operation.id in operation_ids:
+                    raise ValueError(
+                        f"duplicate operation id {operation.id} in operations list"
+                    )
+                operation_ids.add(operation.id)
+        return self
+
+    def get_start(self) -> datetime | None:
+        if self.window.start is not None:
+            return self.window.start
+        else:
+            return (
+                sorted(self.events, key=lambda e: e.created_at)[0].created_at
+                if len(self.events) > 0
+                else None
+            )
+
+    def get_end(self) -> datetime | None:
+        if self.window.end is not None:
+            return self.window.end
+        else:
+            return (
+                sorted(self.events, key=lambda e: e.created_at)[-1].created_at
+                if len(self.events) > 0
+                else None
+            )
+
+    def get_duration_seconds(self) -> float | None:
+        start = self.get_start()
+        end = self.get_end()
+        if start is not None and end is not None:
+            return (end - start).total_seconds()
+        else:
+            return None
+
+    def get_operation_ids(self) -> set[UUID]:
+        operation_ids = set()
+        for event in self.events:
+            if event.operation_id is not None:
+                operation_ids.add(event.operation_id)
+        return operation_ids
+
+    def get_completed_operations(self):
+        completed_operations: list[str] = []
+        if self.operations is not None:
+            for operation in self.operations:
+                if operation.state == ExecutionState.COMPLETED:
+                    completed_operations.append(operation.id)
+        else:
+            for event in self.events:
+                if event.event_type in {
+                    EventType.OPERATION_COMPLETED,
+                    EventType.OPERATION_FAILED,
+                    EventType.OPERATION_CANCELLED,
+                }:
+                    if event.operation_id is not None:
+                        completed_operations.append(event.operation_id)
+        return completed_operations

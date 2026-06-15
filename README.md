@@ -68,6 +68,12 @@ With Flask + Flasgger API extras:
 pip install -e .[api]
 ```
 
+With Plotly visualization extras:
+
+```bash
+pip install -e .[vis]
+```
+
 ## Quickstart
 
 ```python
@@ -223,6 +229,15 @@ python examples/dispatcher.py
 
 ```bash
 python examples/dispatcher_visualization.py
+```
+
+- History Gantt visualization:
+
+```python
+from operation_dispatcher import show_history_gantt
+
+history = dispatcher.get_history()
+show_history_gantt(history, title="Dispatcher History")
 ```
 
 - Flask + OpenAPI demo:

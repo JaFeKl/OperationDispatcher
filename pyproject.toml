@@ -27,6 +27,11 @@ api = [
 mcp = [
   "fastmcp>=2.0",
 ]
+vis = [
+  "plotly>=6.0,<7.0",
+  "numpy>=2.0,<3.0",
+  "pandas>3.0"
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

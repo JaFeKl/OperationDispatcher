@@ -206,12 +206,15 @@ class BrowserEventVisualizer:
 
         operation = operation_dispatcher.get_operation(operation_id)
         if operation is None:
-            history = operation_dispatcher.get_history(limit=self._max_events)
-            for history_record in history.records:
-                if history_record.operation.id != operation_id:
+            history = operation_dispatcher.get_history(
+                limit=self._max_events,
+                resolve_operations=True,
+            )
+            for history_operation in history.operations or []:
+                if history_operation.id != operation_id:
                     continue
-                operation = history_record.operation
-                break
+                else:
+                    operation = history_operation
 
         if operation is None:
             return None
@@ -505,7 +508,7 @@ _INDEX_HTML = """<!doctype html>
         }
 
         let detailsHtml = detailsBlock('Show event details', eventDetails);
-        if (hasOperationContext && operationDetails !== null) {
+        if (operationDetails !== null) {
           detailsHtml += detailsBlock('Show operation details', operationDetails);
         }
 

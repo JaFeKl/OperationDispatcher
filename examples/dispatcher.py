@@ -87,12 +87,8 @@ class CallbackDrivenDispatcher:
         self.operation_dispatcher.request_stop()
         await runtime_task  # wait for dispatcher to finish shutting down
 
-        print("\nCompleted operations:")
-        history = self.operation_dispatcher.get_history()
-        for record in history.records:
-            print(
-                f"- {record.operation.id} - {record.operation.payload.get('name', 'unknown')}"
-            )
+        history = self.operation_dispatcher.get_history(resolve_operations=True)
+        print(f"Completed operations: {len(history.get_completed_operations())}")
 
     def shutdown(self) -> None:
         self._simulated_runner.cancel()

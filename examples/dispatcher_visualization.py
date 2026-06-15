@@ -100,7 +100,7 @@ class VisualizedDispatcherDemo:
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     logger = logging.getLogger(__name__)
     demo = VisualizedDispatcherDemo(host="0.0.0.0", logger=logger)
     try:
