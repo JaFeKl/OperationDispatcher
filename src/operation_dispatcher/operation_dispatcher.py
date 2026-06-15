@@ -279,6 +279,14 @@ class OperationDispatcher:
         resolve_operations: bool = False,
         limit: int | None = None,
     ) -> History:
+        """Get dispatcher history.
+
+        Selection semantics:
+        - If `from_time` and `to_time` are both `None`, `limit` selects the most
+          recent events.
+        - If a time window is provided, events are filtered chronologically and
+          `limit` selects the most recent events within that filtered window.
+        """
         return self._history_service.get_history(
             from_time=from_time,
             to_time=to_time,

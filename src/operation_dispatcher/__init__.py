@@ -34,18 +34,24 @@ except ImportError:
 
 try:
     from .operation_dispatcher_mcp import (
-        BasicMCPTool,
+        DispatcherMCPTools,
+        DispatcherMCPResources,
+        DispatcherMCPPrompts,
         OperationDispatcherMCPContext,
         OperationDispatcherMCPServer,
-        create_operation_dispatcher_mcp_server,
+        OperationDispatcherMCPUtility,
     )
 except ImportError:
     pass
 
 _OPTIONAL_MCP_EXPORTS = {
-    "BasicMCPTool",
+    "DispatcherMCPTools",
+    "DispatcherMCPResources",
+    "DispatcherMCPPrompts",
     "OperationDispatcherMCPContext",
     "OperationDispatcherMCPServer",
+    "OperationDispatcherMCPUtility",
+    "create_operation_dispatcher_mcp_utility",
     "create_operation_dispatcher_mcp_server",
 }
 
@@ -88,9 +94,13 @@ if "OperationDispatcherOpenAPI" in globals():
 if "OperationDispatcherMCPServer" in globals():
     __all__.extend(
         [
-            "BasicMCPTool",
+            "DispatcherMCPTools",
+            "DispatcherMCPResources",
+            "DispatcherMCPPrompts",
             "OperationDispatcherMCPContext",
             "OperationDispatcherMCPServer",
+            "OperationDispatcherMCPUtility",
+            "create_operation_dispatcher_mcp_utility",
             "create_operation_dispatcher_mcp_server",
         ]
     )

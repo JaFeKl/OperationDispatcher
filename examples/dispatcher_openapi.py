@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 from datetime import datetime
 import logging
@@ -19,6 +20,7 @@ from operation_dispatcher import (
     Operation,
 )
 from operation_dispatcher import SimulatedOperationRunner
+from operation_dispatcher.runtime_controller import OperationDispatcherRuntimeController
 
 
 class MyOperationPayload(BaseModel):
@@ -34,10 +36,14 @@ class DemoDispatcherService:
 
         self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
+            start_paused=True,
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
             on_history_callback=self._on_history,
             logger=logger,
+        )
+        self._runtime_controller = OperationDispatcherRuntimeController(
+            self.operation_dispatcher
         )
 
         self._visualizer = BrowserEventVisualizer(
@@ -159,7 +165,7 @@ class DemoDispatcherService:
 
         return app
 
-    def run_demo(self) -> None:
+    async def run_demo(self) -> None:
         self.operation_dispatcher.add_operation(
             Operation(
                 payload=MyOperationPayload(
@@ -182,11 +188,13 @@ class DemoDispatcherService:
                 priority=0,
             )
         )
+        self._runtime_controller.start()
         app = self.create_app()
         app.run(host=self.host, port=8000, debug=False, use_reloader=False)
 
     def shutdown(self) -> None:
         self._simulated_runner.cancel()
+        self._runtime_controller.stop()
         self._visualizer.stop()
 
 
@@ -195,7 +203,7 @@ def main() -> None:
     logger = logging.getLogger(__name__)
     demo_dispatcher = DemoDispatcherService(host="0.0.0.0", logger=logger)
     try:
-        demo_dispatcher.run_demo()
+        asyncio.run(demo_dispatcher.run_demo())
     finally:
         demo_dispatcher.shutdown()
 

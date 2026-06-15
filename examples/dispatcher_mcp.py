@@ -11,6 +11,9 @@ from operation_dispatcher import (
     OperationDispatcherRuntimeController,
     Operation,
     SimulatedOperationRunner,
+    DispatcherMCPTools,
+    DispatcherMCPResources,
+    DispatcherMCPPrompts,
 )
 
 
@@ -29,15 +32,20 @@ class DemoDispatcherMCPService:
             on_notification_callback=self._on_notification,
             logger=self._logger,
         )
+
+        self._runtime_controller = OperationDispatcherRuntimeController(
+            self.operation_dispatcher
+        )
+
         self.mcp_server = OperationDispatcherMCPServer(
             self.operation_dispatcher,
             name="Operation Dispatcher MCP Server",
             instructions="This is an example MCP server exposing an OperationDispatcher instance.",
             host=host,
+            tools=list(DispatcherMCPTools),
+            resources=list(DispatcherMCPResources),
+            prompts=list(DispatcherMCPPrompts),
             json_response=True,
-        )
-        self._runtime_controller = OperationDispatcherRuntimeController(
-            self.operation_dispatcher
         )
 
         self._simulated_runner = SimulatedOperationRunner(

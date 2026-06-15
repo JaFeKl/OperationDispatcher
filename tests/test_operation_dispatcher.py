@@ -642,6 +642,45 @@ def test_dispatcher_history_events_and_resolved_operations_include_operation() -
     )
 
 
+def test_dispatcher_history_limit_without_time_window_returns_most_recent_events() -> (
+    None
+):
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
+
+    full_history = dispatcher.get_history()
+    assert len(full_history.events) >= 2
+
+    last_event_id = full_history.events[-1].id
+    limited_history = dispatcher.get_history(limit=1)
+
+    assert len(limited_history.events) == 1
+    assert limited_history.events[0].id == last_event_id
+
+
+def test_dispatcher_history_limit_with_time_window_returns_most_recent_events() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    operation = _operation()
+    dispatcher.add_operation(operation)
+    asyncio.run(dispatcher.step_dispatch())
+    dispatcher.complete_operation(operation.id)
+
+    full_history = dispatcher.get_history()
+    assert len(full_history.events) >= 2
+
+    last_event_id = full_history.events[-1].id
+    windowed_history = dispatcher.get_history(
+        from_time=datetime.min.replace(tzinfo=timezone.utc),
+        limit=1,
+    )
+
+    assert len(windowed_history.events) == 1
+    assert windowed_history.events[0].id == last_event_id
+
+
 def test_dispatcher_history_callback_can_override_in_memory_history() -> None:
     callback_calls: list[tuple[datetime | None, datetime | None, bool, int | None]] = []
 

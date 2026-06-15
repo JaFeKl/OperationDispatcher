@@ -19,6 +19,12 @@ from operation_dispatcher import (
     Operation,
     SimulatedOperationRunner,
 )
+from operation_dispatcher.operation_dispatcher_mcp import (
+    DispatcherMCPPrompts,
+    DispatcherMCPResources,
+    DispatcherMCPTools,
+)
+from operation_dispatcher.runtime_controller import OperationDispatcherRuntimeController
 
 
 class DemoDispatcherService:
@@ -26,7 +32,7 @@ class DemoDispatcherService:
     Demonstrates a shared OperationDispatcher exposed through both:
 
     - OpenAPI (Flask)
-    - MCP (SSE transport)
+    - MCP
 
     Both interfaces share the same dispatcher instance.
     """
@@ -46,28 +52,24 @@ class DemoDispatcherService:
         self._mcp_port = mcp_port
         self._visualizer_port = visualizer_port
 
-        #
-        # Core dispatcher
-        #
-        self.dispatcher = OperationDispatcher(
+        self.operation_dispatcher = OperationDispatcher(
             resource_id="robot-1",
+            start_paused=True,
             on_request_callback=self._on_request,
             on_notification_callback=self._on_notification,
             logger=self._logger,
         )
+        self._runtime_controller = OperationDispatcherRuntimeController(
+            self.operation_dispatcher
+        )
+        self.operation_dispatcher_api = OperationDispatcherOpenAPI(
+            self.operation_dispatcher
+        )
 
-        #
-        # Shared runtime owner
-        #
-        self.dispatcher_api = OperationDispatcherOpenAPI(self.dispatcher)
-
-        #
-        # Visualization
-        #
         self.visualizer = BrowserEventVisualizer(
             host=self._host,
             port=self._visualizer_port,
-            operation_dispatcher=self.dispatcher,
+            operation_dispatcher=self.operation_dispatcher,
         )
         self.visualizer.start()
 
@@ -77,10 +79,7 @@ class DemoDispatcherService:
             self._visualizer_port,
         )
 
-        #
-        # Simulated execution backend
-        #
-        self.runner = SimulatedOperationRunner(
+        self._simulated_runner = SimulatedOperationRunner(
             on_complete=self._on_completed,
             logger=self._logger,
         )
@@ -93,58 +92,29 @@ class DemoDispatcherService:
         """
         Handle dispatcher lifecycle requests.
         """
-        self._logger.info(
-            "Received request %s for operation %s",
-            event.event_type,
-            event.operation_id,
-        )
-
         self.visualizer.on_request(event)
-
-        operation = self.dispatcher.get_scheduled_operation(event.operation_id)
-
+        self._logger.info(
+            f"Received request {event.event_type} for operation_id {event.operation_id}"
+        )
+        if event.operation_id is None:
+            return None
+        operation = self.operation_dispatcher.get_operation(event.operation_id)
         if operation is None:
-            self._logger.warning(
-                "Unknown operation_id %s",
-                event.operation_id,
+            return None
+
+        if event.event_type is EventType.OPERATION_START_REQUESTED:
+            run_seconds = float(operation.payload.get("run_seconds", 1.0))
+            self._simulated_runner.start(
+                operation_id=operation.id,
+                run_seconds=run_seconds,
             )
-            return None
-
-        handlers: dict[EventType, Callable[[UUID], None]] = {
-            EventType.OPERATION_START_REQUESTED: self.runner.start,
-            EventType.OPERATION_CANCEL_REQUESTED: self.runner.cancel,
-            EventType.OPERATION_PAUSE_REQUESTED: self.runner.pause,
-            EventType.OPERATION_RESUME_REQUESTED: self.runner.resume,
-        }
-
-        handler = handlers.get(event.event_type)
-
-        if handler is None:
-            return None
-
-        try:
-            kwargs = {"operation_id": operation.id}
-
-            if event.event_type is EventType.OPERATION_START_REQUESTED:
-                kwargs["run_seconds"] = float(operation.payload.get("run_seconds", 5.0))
-
-            handler(**kwargs)
+            print("Started operation with payload:", operation.payload)
             return True
-
-        except RuntimeError as error:
-            self._logger.warning(
-                "Failed to handle %s for operation %s: %s",
-                event.event_type,
-                event.operation_id,
-                error,
-            )
-            return False
+        return None
 
     def _on_notification(self, event: DispatchEvent) -> None:
         self._logger.info(
-            "Received notification %s for operation %s",
-            event.event_type,
-            event.operation_id,
+            f"Received notification event {event.event_type} for operation_id {event.operation_id}"
         )
 
         self.visualizer.on_notification(event)
@@ -153,16 +123,7 @@ class DemoDispatcherService:
         """
         Completion callback from the simulated runner.
         """
-        current = self.dispatcher.current_scheduled_operation
-
-        if current is None or current.id != operation_id:
-            self._logger.warning(
-                "Completion received for non-current operation %s",
-                operation_id,
-            )
-            return
-
-        self.dispatcher.complete_current()
+        self.operation_dispatcher.complete_operation(operation_id)
 
     # -------------------------------------------------------------------------
     # OpenAPI
@@ -180,7 +141,7 @@ class DemoDispatcherService:
                     "Example API exposing an OperationDispatcher instance."
                 ),
             },
-            "definitions": self.dispatcher_api.get_openapi_definitions(),
+            "definitions": self.operation_dispatcher_api.get_openapi_definitions(),
         }
 
         swagger_config = {
@@ -200,7 +161,7 @@ class DemoDispatcherService:
 
         Swagger(app, template=swagger_template, config=swagger_config)
 
-        self.dispatcher_api.register_default_endpoints(app)
+        self.operation_dispatcher_api.register_default_endpoints(app)
 
         return app
 
@@ -210,7 +171,7 @@ class DemoDispatcherService:
 
     def create_mcp_server(self) -> OperationDispatcherMCPServer:
         return OperationDispatcherMCPServer(
-            self.dispatcher,
+            self.operation_dispatcher,
             name="Shared Operation Dispatcher",
             instructions=(
                 "This MCP server exposes a shared OperationDispatcher. "
@@ -220,6 +181,9 @@ class DemoDispatcherService:
             ),
             host=self._host,
             port=self._mcp_port,
+            tools=list(DispatcherMCPTools),
+            resources=list(DispatcherMCPResources),
+            prompts=list(DispatcherMCPPrompts),
             json_response=True,
         )
 
@@ -250,7 +214,7 @@ class DemoDispatcherService:
         ]
 
         for operation in operations:
-            self.dispatcher.add(operation)
+            self.operation_dispatcher.add_operation(operation)
 
     # -------------------------------------------------------------------------
     # Runtime
@@ -259,6 +223,7 @@ class DemoDispatcherService:
     async def run(self) -> None:
         self.load_demo_schedule()
 
+        self._runtime_controller.start()
         flask_app = self.create_flask_app()
 
         flask_thread = threading.Thread(
@@ -293,8 +258,8 @@ class DemoDispatcherService:
 
     def shutdown(self) -> None:
         self._logger.info("Shutting down demo service")
-
-        self.runner.cancel()
+        self._simulated_runner.cancel()
+        self._runtime_controller.stop()
         self.visualizer.stop()
 
 

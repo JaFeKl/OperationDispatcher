@@ -17,6 +17,21 @@ class DispatcherHistoryService:
         resolve_operations: bool = False,
         limit: Optional[int] = None,
     ) -> History:
+        """Return dispatcher history from in-memory events and optional callback override.
+
+        Behavior:
+        - Without an explicit time window (`from_time` and `to_time` are both `None`),
+          `limit` returns the most recent events.
+        - With an explicit time window (`from_time` and/or `to_time`), events are
+          filtered in chronological order and `limit` returns the most recent matching
+          events within that filtered window.
+        - When `resolve_operations=True`, operations referenced by the selected events
+          are included in the returned `History`.
+        - If `on_history_callback` is configured, it receives
+          `(from_time, to_time, resolve_operations, limit, in_memory_history)` and may
+          return a `History` to override the in-memory result. Returning `None` keeps
+          the in-memory result.
+        """
         in_memory_history = self._get_in_memory_history(
             from_time, to_time, resolve_operations, limit
         )
@@ -52,8 +67,12 @@ class DispatcherHistoryService:
             if to_time is not None and event.created_at > to_time:
                 continue
             filtered_events.append(event)
-            if limit is not None and len(filtered_events) >= limit:
-                break
+
+        if limit is not None:
+            if limit <= 0:
+                filtered_events = []
+            else:
+                filtered_events = filtered_events[-limit:]
 
         operations = []
         if resolve_operations is True:

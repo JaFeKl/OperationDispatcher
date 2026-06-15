@@ -19,6 +19,14 @@ class DispatcherEventService:
         self._state_store = state_store
         self._notify_wakeup = notify_wakeup
 
+    def get_events_for_operation(self, operation_id: UUID) -> list[DispatchEvent]:
+        """Get all events for a given operation_id from in-memory history."""
+        return [
+            event
+            for event in self._state_store.event_history
+            if event.operation_id == operation_id
+        ]
+
     def emit_event(
         self,
         event_type: EventType,
