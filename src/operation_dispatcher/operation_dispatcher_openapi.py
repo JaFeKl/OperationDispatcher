@@ -289,12 +289,14 @@ class OperationDispatcherOpenAPI:
         try:
             operation = Operation.model_validate(
                 {
+                    "job_id": request_payload.get("job_id"),
                     "payload": payload,
                     "resource_id": self._resource_id,
                     "priority": request_payload.get("priority", 0),
                     "release_date": request_payload.get("release_date"),
                     "planned_duration": request_payload.get("planned_duration"),
                     "due_date": request_payload.get("due_date"),
+                    "dependencies": request_payload.get("dependencies", []),
                 }
             )
         except (ValidationError, TypeError, ValueError) as error:
@@ -1443,6 +1445,12 @@ class OperationDispatcherOpenAPI:
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "format": "uuid"},
+                    "job_id": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "null"},
+                        ]
+                    },
                     "payload": self._build_payload_property_schema(),
                     "resource_id": {"type": "string"},
                     "priority": {"type": "integer"},
@@ -1455,7 +1463,7 @@ class OperationDispatcherOpenAPI:
                     "due_date": {"type": "string", "format": "date-time"},
                     "dependencies": {
                         "type": "array",
-                        "items": {"type": "string", "format": "uuid"},
+                        "items": {"$ref": "#/definitions/OperationDependency"},
                     },
                     "state": {"type": "string"},
                     "outcome": {"type": "string"},
@@ -1497,6 +1505,27 @@ class OperationDispatcherOpenAPI:
                 "required": [
                     "operation",
                     "is_current_operation",
+                ],
+            },
+            "OperationDependency": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "depends_on_operation_id": {
+                        "type": "string",
+                        "format": "uuid",
+                    },
+                    "dependency_type": {
+                        "type": "string",
+                        "enum": [dependency.value for dependency in DependencyType],
+                    },
+                    "created_at": {"type": "string", "format": "date-time"},
+                },
+                "required": [
+                    "id",
+                    "depends_on_operation_id",
+                    "dependency_type",
+                    "created_at",
                 ],
             },
             "ChangeRecord": {
@@ -1626,6 +1655,10 @@ class OperationDispatcherOpenAPI:
             "AddOperationItem": {
                 "type": "object",
                 "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Optional business-level operation identifier independent from dependency links.",
+                    },
                     "payload": self._build_payload_property_schema(),
                     "priority": {"type": "integer"},
                     "release_date": {"type": "string", "format": "date-time"},
@@ -1635,6 +1668,30 @@ class OperationDispatcherOpenAPI:
                         "description": "Planned operation duration in milliseconds.",
                     },
                     "due_date": {"type": "string", "format": "date-time"},
+                    "dependencies": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "depends_on_operation_id": {
+                                    "type": "string",
+                                    "format": "uuid",
+                                },
+                                "dependency_type": {
+                                    "type": "string",
+                                    "enum": [
+                                        dependency.value
+                                        for dependency in DependencyType
+                                    ],
+                                },
+                            },
+                            "required": [
+                                "depends_on_operation_id",
+                                "dependency_type",
+                            ],
+                        },
+                        "description": "Optional list of dependency descriptors evaluated by dependency_type and depends_on_operation_id.",
+                    },
                 },
                 "required": ["payload"],
             },

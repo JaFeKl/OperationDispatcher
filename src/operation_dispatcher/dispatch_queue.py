@@ -4,9 +4,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from heapq import heappop, heappush
 from uuid import UUID
 
-from .models import Operation
+from .models import DependencyType, Operation
 
 
 class SortField(str, Enum):
@@ -164,6 +165,59 @@ class DispatchQueue:
 
     def _sort_operations(self) -> None:
         self._queue.sort(key=self._operation_sort_key)
+        self._queue = self._apply_dependency_order(self._queue)
+
+    def _apply_dependency_order(self, operations: list[Operation]) -> list[Operation]:
+        if len(operations) <= 1:
+            return operations
+
+        indexed_operations = list(enumerate(operations))
+        provider_indices: dict[UUID, int] = {
+            operation.id: index for index, operation in indexed_operations
+        }
+
+        outgoing_edges: dict[int, set[int]] = {
+            index: set() for index, _ in indexed_operations
+        }
+        incoming_degree: dict[int, int] = {index: 0 for index, _ in indexed_operations}
+
+        for dependent_index, operation in indexed_operations:
+            for dependency in operation.dependencies:
+                if dependency.dependency_type not in {
+                    DependencyType.FINISH_TO_START,
+                    DependencyType.START_TO_START,
+                }:
+                    continue
+
+                provider_index = provider_indices.get(
+                    dependency.depends_on_operation_id
+                )
+                if provider_index is None or provider_index == dependent_index:
+                    continue
+                if dependent_index not in outgoing_edges[provider_index]:
+                    outgoing_edges[provider_index].add(dependent_index)
+                    incoming_degree[dependent_index] += 1
+
+        # Use queue sort order as the tie-breaker within each topological layer.
+        ready_heap: list[int] = []
+        for index, degree in incoming_degree.items():
+            if degree == 0:
+                heappush(ready_heap, index)
+
+        ordered_indices: list[int] = []
+        while ready_heap:
+            provider_index = heappop(ready_heap)
+            ordered_indices.append(provider_index)
+            for dependent_index in outgoing_edges[provider_index]:
+                incoming_degree[dependent_index] -= 1
+                if incoming_degree[dependent_index] == 0:
+                    heappush(ready_heap, dependent_index)
+
+        if len(ordered_indices) != len(operations):
+            # Cycles or unresolved dependency chains fall back to rule sorting.
+            return operations
+
+        return [operations[index] for index in ordered_indices]
 
     def _operation_sort_key(
         self, operation: Operation

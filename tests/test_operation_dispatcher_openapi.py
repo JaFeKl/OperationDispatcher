@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 import time
+from uuid import uuid4
 
 import pytest
 
@@ -61,6 +62,40 @@ def test_openapi_add_operations_returns_operation_status_list() -> None:
     assert len(payload) == 2
     assert all(
         item["operation"]["state"] == ExecutionState.QUEUED.value for item in payload
+    )
+
+
+def test_openapi_add_operation_accepts_job_id_and_dependencies() -> None:
+    dispatcher = OperationDispatcher(resource_id="resource-a")
+    dispatcher_api = OperationDispatcherOpenAPI(dispatcher)
+
+    depends_on_operation_id = str(uuid4())
+
+    payload, status = dispatcher_api.add_operation_response(
+        [
+            {
+                "job_id": "order-1-op-2",
+                "payload": {"task": "second"},
+                "dependencies": [
+                    {
+                        "depends_on_operation_id": depends_on_operation_id,
+                        "dependency_type": "FINISH_TO_START",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert status == 201
+    assert payload[0]["operation"]["job_id"] == "order-1-op-2"
+    assert len(payload[0]["operation"]["dependencies"]) == 1
+    assert (
+        payload[0]["operation"]["dependencies"][0]["depends_on_operation_id"]
+        == depends_on_operation_id
+    )
+    assert (
+        payload[0]["operation"]["dependencies"][0]["dependency_type"]
+        == "FINISH_TO_START"
     )
 
 

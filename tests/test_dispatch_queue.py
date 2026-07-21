@@ -8,20 +8,24 @@ from operation_dispatcher.dispatch_queue import (
     SortField,
     SortRule,
 )
-from operation_dispatcher.models import Operation
+from operation_dispatcher.models import DependencyType, Operation, OperationDependency
 
 
 def _scheduled_operation(
     *,
     resource_id: str = "resource-a",
+    job_id: str | None = None,
+    dependencies: list[OperationDependency] | None = None,
     priority: int = 0,
     release_date: datetime | None = None,
     due_date: datetime | None = None,
     planned_duration: int | None = None,
 ) -> Operation:
     return Operation(
+        job_id=job_id,
         payload={},
         resource_id=resource_id,
+        dependencies=[] if dependencies is None else dependencies,
         priority=priority,
         release_date=release_date,
         due_date=due_date,
@@ -132,6 +136,27 @@ def test_sort_rules_allow_custom_release_date_precedence() -> None:
     queue.add(low_early)
 
     assert queue.next() is low_early
+
+
+def test_dependency_sorting_prioritizes_provider_before_dependent() -> None:
+    provider = _scheduled_operation(job_id="order-1-op-1", priority=1)
+    dependent = _scheduled_operation(
+        job_id="charge-1",
+        dependencies=[
+            OperationDependency(
+                depends_on_operation_id=provider.id,
+                dependency_type=DependencyType.FINISH_TO_START,
+            )
+        ],
+        priority=10,
+    )
+
+    queue = DispatchQueue(resource_id="resource-a")
+    queue.add(dependent)
+    queue.add(provider)
+
+    assert queue.list()[0] is provider
+    assert queue.list()[1] is dependent
 
 
 def test_sort_rules_reject_empty_configuration() -> None:

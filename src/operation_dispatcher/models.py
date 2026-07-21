@@ -102,6 +102,7 @@ class Operation(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
+    job_id: str | None = None
 
     # user payload describing the operation to be performed, e.g. command, parameters, etc.
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -112,7 +113,7 @@ class Operation(BaseModel):
     release_date: datetime | None = None
     planned_duration: int | None = None
     due_date: datetime | None = None
-    dependencies: list[UUID] = Field(default_factory=list)
+    dependencies: list[OperationDependency] = Field(default_factory=list)
 
     # Runtime state
     state: ExecutionState = ExecutionState.QUEUED
@@ -159,7 +160,6 @@ class OperationDependency(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    operation_id: UUID
     depends_on_operation_id: UUID
     dependency_type: DependencyType
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -167,7 +167,7 @@ class OperationDependency(BaseModel):
     @model_validator(mode="after")
     def validate_unique_dependency(self) -> OperationDependency:
         self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
-        if self.operation_id == self.depends_on_operation_id:
+        if self.depends_on_operation_id == self.id:
             raise ValueError("operation cannot depend on itself")
         return self
 
