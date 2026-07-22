@@ -9,7 +9,14 @@ from flask import jsonify, request
 from flasgger import swag_from
 from pydantic import ValidationError
 
-from .models import EventType, ExecutionState, Operation, TerminationReason, History
+from .models import (
+    DependencyType,
+    EventType,
+    ExecutionState,
+    History,
+    Operation,
+    TerminationReason,
+)
 from .action_descriptions import OPENAPI_ACTION_DESCRIPTIONS
 from .operation_dispatcher import OperationDispatcher
 from .runtime_controller import OperationDispatcherRuntimeController

@@ -173,6 +173,7 @@ class DemoDispatcherService:
                     task="pickup",
                     run_seconds=10.0,
                 ).model_dump(),
+                job_id="job-1",
                 resource_id="robot-1",
                 priority=0,
             )
@@ -184,6 +185,7 @@ class DemoDispatcherService:
                     task="dropoff",
                     run_seconds=8.0,
                 ).model_dump(),
+                job_id="job-1",
                 resource_id="robot-1",
                 priority=0,
             )
