@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from ..models import DispatchEvent
+from ..models import DEFAULT_EVENT_HISTORY_LIMIT, DispatchEvent
 from ..operation_dispatcher import OperationDispatcher
 
 
@@ -31,11 +31,17 @@ class BrowserEventVisualizer:
         self,
         host: str = "127.0.0.1",
         port: int = 8765,
-        max_events: int = 1000,
+        max_events: int | None = None,
         operation_dispatcher: OperationDispatcher | None = None,
     ) -> None:
         self._host = host
         self._port = port
+        if max_events is None:
+            max_events = (
+                operation_dispatcher.event_history_limit
+                if operation_dispatcher is not None
+                else DEFAULT_EVENT_HISTORY_LIMIT
+            )
         self._max_events = max_events
 
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
@@ -498,36 +504,36 @@ _INDEX_HTML = """<!doctype html>
         };
         const operationDetails = event.operation_details || null;
 
+        function element(tag, className, text) {
+          const node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined) node.textContent = text;
+          return node;
+        }
+
         function detailsBlock(title, data) {
-          return `
-            <details>
-              <summary>${title}</summary>
-              <pre>${JSON.stringify(data, null, 2)}</pre>
-            </details>
-          `;
+          const details = element('details');
+          details.appendChild(element('summary', '', title));
+          details.appendChild(element('pre', '', JSON.stringify(data, null, 2)));
+          return details;
         }
 
-        let detailsHtml = detailsBlock('Show event details', eventDetails);
-        if (operationDetails !== null) {
-          detailsHtml += detailsBlock('Show operation details', operationDetails);
-        }
-
+        const layout = element('div', 'event-layout');
+        const main = element('div', 'event-main');
+        const row = element('div', 'row');
+        row.appendChild(element('span', `chip ${sourceClass}`, event.source));
+        row.appendChild(element('span', 'type', event.event_type));
+        main.appendChild(row);
         const operationMeta = metaParts.length > 0 ? ` · ${metaParts.join(' · ')}` : '';
-
-        item.innerHTML = `
-          <div class="event-layout">
-            <div class="event-main">
-              <div class="row">
-                <span class="chip ${sourceClass}">${event.source}</span>
-                <span class="type">${event.event_type}</span>
-              </div>
-              <div class="meta">${toLocalTime(event.timestamp)}${operationMeta}</div>
-            </div>
-            <div class="details-grid">
-              ${detailsHtml}
-            </div>
-          </div>
-        `;
+        main.appendChild(element('div', 'meta', `${toLocalTime(event.timestamp)}${operationMeta}`));
+        const details = element('div', 'details-grid');
+        details.appendChild(detailsBlock('Show event details', eventDetails));
+        if (operationDetails !== null) {
+          details.appendChild(detailsBlock('Show operation details', operationDetails));
+        }
+        layout.appendChild(main);
+        layout.appendChild(details);
+        item.appendChild(layout);
 
         timelineEl.prepend(item);
       }

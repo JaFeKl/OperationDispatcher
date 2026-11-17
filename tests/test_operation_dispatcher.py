@@ -39,19 +39,22 @@ def test_dispatcher_starts_and_completes_operation() -> None:
 
     started = asyncio.run(dispatcher.step_dispatch())
 
-    assert started is operation
-    assert dispatcher.current_operation is operation
-    assert operation.state is ExecutionState.RUNNING
-    assert operation.outcome is ExecutionOutcome.NONE
-    assert operation.termination_reason is TerminationReason.NONE
+    assert started.id == operation.id
+    assert dispatcher.current_operation.id == operation.id
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.RUNNING
+    assert dispatcher.get_operation(operation.id).outcome is ExecutionOutcome.NONE
+    assert (
+        dispatcher.get_operation(operation.id).termination_reason
+        is TerminationReason.NONE
+    )
 
     completed = dispatcher.complete_operation(operation.id)
 
-    assert completed is operation
+    assert completed.id == operation.id
     assert dispatcher.current_operation is None
-    assert operation.state is ExecutionState.COMPLETED
-    assert operation.outcome is ExecutionOutcome.SUCCESS
-    assert operation.finish_time is not None
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.COMPLETED
+    assert dispatcher.get_operation(operation.id).outcome is ExecutionOutcome.SUCCESS
+    assert dispatcher.get_operation(operation.id).finish_time is not None
 
 
 def test_dispatcher_add_applies_default_planned_duration() -> None:
@@ -144,7 +147,7 @@ def test_dispatcher_step_dispatch_starts_operation_when_requests_allowed() -> No
 
     executed = asyncio.run(dispatcher.step_dispatch())
 
-    assert executed is operation
+    assert executed.id == operation.id
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_START_REQUESTED,
@@ -161,7 +164,7 @@ def test_dispatcher_pause_blocks_step_dispatch_until_resumed() -> None:
     assert asyncio.run(dispatcher.step_dispatch()) is None
 
     dispatcher.resume_dispatcher_runtime()
-    assert asyncio.run(dispatcher.step_dispatch()) is operation
+    assert asyncio.run(dispatcher.step_dispatch()).id == operation.id
 
 
 def test_dispatcher_start_paused_blocks_step_dispatch_until_resumed() -> None:
@@ -174,7 +177,7 @@ def test_dispatcher_start_paused_blocks_step_dispatch_until_resumed() -> None:
 
     dispatcher.resume_dispatcher_runtime()
     assert dispatcher.is_paused is False
-    assert asyncio.run(dispatcher.step_dispatch()) is operation
+    assert asyncio.run(dispatcher.step_dispatch()).id == operation.id
 
 
 def test_dispatcher_cancel_queued_operation_sets_cancelled_state() -> None:
@@ -196,11 +199,14 @@ def test_dispatcher_cancel_queued_operation_sets_cancelled_state() -> None:
 
     cancelled = dispatcher.cancel_operation(operation.id)
 
-    assert cancelled is operation
-    assert operation.state is ExecutionState.COMPLETED
-    assert operation.outcome is ExecutionOutcome.CANCELLED
-    assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
-    assert operation.finish_time is not None
+    assert cancelled.id == operation.id
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.COMPLETED
+    assert dispatcher.get_operation(operation.id).outcome is ExecutionOutcome.CANCELLED
+    assert (
+        dispatcher.get_operation(operation.id).termination_reason
+        is TerminationReason.INTERNAL_ERROR
+    )
+    assert dispatcher.get_operation(operation.id).finish_time is not None
     assert seen_events == [
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_CANCEL_REQUESTED,
@@ -216,9 +222,9 @@ def test_dispatcher_cancel_current_operation_sets_cancelled_state() -> None:
 
     cancelled = dispatcher.cancel_operation(operation.id)
 
-    assert cancelled is operation
+    assert cancelled.id == operation.id
     assert dispatcher.current_operation is None
-    assert operation.state is ExecutionState.COMPLETED
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.COMPLETED
 
 
 def test_dispatcher_fail_operation_sets_failed_state() -> None:
@@ -229,11 +235,14 @@ def test_dispatcher_fail_operation_sets_failed_state() -> None:
 
     failed = dispatcher.fail_operation(operation.id)
 
-    assert failed is operation
-    assert operation.state is ExecutionState.COMPLETED
-    assert operation.outcome is ExecutionOutcome.FAILURE
-    assert operation.termination_reason is TerminationReason.INTERNAL_ERROR
-    assert operation.finish_time is not None
+    assert failed.id == operation.id
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.COMPLETED
+    assert dispatcher.get_operation(operation.id).outcome is ExecutionOutcome.FAILURE
+    assert (
+        dispatcher.get_operation(operation.id).termination_reason
+        is TerminationReason.INTERNAL_ERROR
+    )
+    assert dispatcher.get_operation(operation.id).finish_time is not None
 
 
 def test_dispatcher_cancel_operation_accepts_termination_reason_override() -> None:
@@ -246,10 +255,13 @@ def test_dispatcher_cancel_operation_accepts_termination_reason_override() -> No
         termination_reason=TerminationReason.USER_REQUEST,
     )
 
-    assert cancelled is operation
-    assert operation.state is ExecutionState.COMPLETED
-    assert operation.outcome is ExecutionOutcome.CANCELLED
-    assert operation.termination_reason is TerminationReason.USER_REQUEST
+    assert cancelled.id == operation.id
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.COMPLETED
+    assert dispatcher.get_operation(operation.id).outcome is ExecutionOutcome.CANCELLED
+    assert (
+        dispatcher.get_operation(operation.id).termination_reason
+        is TerminationReason.USER_REQUEST
+    )
 
 
 def test_dispatcher_fail_operation_accepts_termination_reason_override() -> None:
@@ -263,10 +275,13 @@ def test_dispatcher_fail_operation_accepts_termination_reason_override() -> None
         termination_reason=TerminationReason.EXTERNAL_ERROR,
     )
 
-    assert failed is operation
-    assert operation.state is ExecutionState.COMPLETED
-    assert operation.outcome is ExecutionOutcome.FAILURE
-    assert operation.termination_reason is TerminationReason.EXTERNAL_ERROR
+    assert failed.id == operation.id
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.COMPLETED
+    assert dispatcher.get_operation(operation.id).outcome is ExecutionOutcome.FAILURE
+    assert (
+        dispatcher.get_operation(operation.id).termination_reason
+        is TerminationReason.EXTERNAL_ERROR
+    )
 
 
 def test_dispatcher_lifecycle_methods_propagate_meta_data_to_events() -> None:
@@ -333,7 +348,7 @@ def test_dispatcher_step_dispatch_waits_for_release_date() -> None:
 
     assert executed is None
     assert dispatcher.current_operation is None
-    assert operation.state is ExecutionState.QUEUED
+    assert dispatcher.get_operation(operation.id).state is ExecutionState.QUEUED
 
 
 def test_dispatcher_get_state_reports_runtime_and_queue_information() -> None:
@@ -439,7 +454,10 @@ def test_dispatcher_resume_current_operation_emits_resume_requested_when_current
         seen_events.append(event.event_type)
         if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
             return True
-        if event.event_type is DispatcherEventType.OPERATION_RESUME_REQUESTED:
+        if event.event_type in (
+            DispatcherEventType.OPERATION_PAUSE_REQUESTED,
+            DispatcherEventType.OPERATION_RESUME_REQUESTED,
+        ):
             return True
         return None
 
@@ -452,6 +470,7 @@ def test_dispatcher_resume_current_operation_emits_resume_requested_when_current
     dispatcher.add_operation(operation)
     asyncio.run(dispatcher.step_dispatch())
 
+    assert dispatcher.pause_operation(operation.id)
     dispatcher.pause_dispatcher_runtime()
     dispatcher.resume_dispatcher_runtime()
     resume_accepted = dispatcher.resume_operation(operation.id)
@@ -462,6 +481,8 @@ def test_dispatcher_resume_current_operation_emits_resume_requested_when_current
         DispatcherEventType.OPERATION_ADDED,
         DispatcherEventType.OPERATION_START_REQUESTED,
         DispatcherEventType.OPERATION_STARTED,
+        DispatcherEventType.OPERATION_PAUSE_REQUESTED,
+        DispatcherEventType.OPERATION_PAUSED,
         DispatcherEventType.OPERATION_DISPATCHER_PAUSED,
         DispatcherEventType.OPERATION_DISPATCHER_RESUMED,
         DispatcherEventType.OPERATION_RESUME_REQUESTED,
@@ -527,7 +548,7 @@ def test_dispatcher_retries_denied_start_after_cooldown() -> None:
 
     executed = asyncio.run(run_attempts())
 
-    assert executed is operation
+    assert executed.id == operation.id
     assert start_request_calls == 2
     assert seen_event_types == [
         DispatcherEventType.OPERATION_ADDED,
@@ -593,7 +614,7 @@ def test_dispatcher_accepts_structured_request_decision() -> None:
 
     executed = asyncio.run(dispatcher.step_dispatch())
 
-    assert executed is operation
+    assert executed.id == operation.id
     request_events = [
         event
         for event in dispatcher.get_history().events
@@ -833,7 +854,7 @@ def test_dispatcher_does_not_pause_current_operation_when_pause_request_denied()
     paused = dispatcher.pause_operation(operation.id)
 
     assert paused is False
-    assert dispatcher.current_operation is operation
+    assert dispatcher.current_operation.id == operation.id
     assert DispatcherEventType.OPERATION_PAUSE_REQUESTED in seen_events
     assert DispatcherEventType.OPERATION_PAUSE_DENIED in seen_events
     assert DispatcherEventType.OPERATION_PAUSED not in seen_events
@@ -846,7 +867,10 @@ def test_dispatcher_does_not_resume_current_operation_when_resume_request_denied
 
     def callback(event) -> bool | None:
         seen_events.append(event.event_type)
-        if event.event_type is DispatcherEventType.OPERATION_START_REQUESTED:
+        if event.event_type in (
+            DispatcherEventType.OPERATION_START_REQUESTED,
+            DispatcherEventType.OPERATION_PAUSE_REQUESTED,
+        ):
             return True
         if event.event_type is DispatcherEventType.OPERATION_RESUME_REQUESTED:
             return False
@@ -860,6 +884,7 @@ def test_dispatcher_does_not_resume_current_operation_when_resume_request_denied
     operation = _operation()
     dispatcher.add_operation(operation)
     asyncio.run(dispatcher.step_dispatch())
+    assert dispatcher.pause_operation(operation.id)
     dispatcher.pause_dispatcher_runtime()
 
     dispatcher.resume_dispatcher_runtime()
@@ -880,7 +905,7 @@ def test_dispatcher_update_operation_emits_operation_updated_with_changes() -> N
 
     updated = dispatcher.update_operation(operation.id, {"priority": 5})
 
-    assert updated is operation
+    assert updated.id == operation.id
     assert updated is not None
     assert updated.priority == 5
 
@@ -901,12 +926,12 @@ def test_dispatcher_update_operation_reorders_queue_when_priority_changes() -> N
     dispatcher.add_operation(lower_priority)
 
     schedule_before = dispatcher.get_schedule()
-    assert schedule_before[0] is higher_priority
-    assert schedule_before[1] is lower_priority
+    assert schedule_before[0].id == higher_priority.id
+    assert schedule_before[1].id == lower_priority.id
 
     updated = dispatcher.update_operation(lower_priority.id, {"priority": 10})
 
-    assert updated is lower_priority
+    assert updated.id == lower_priority.id
     schedule_after = dispatcher.get_schedule()
-    assert schedule_after[0] is lower_priority
-    assert schedule_after[1] is higher_priority
+    assert schedule_after[0].id == lower_priority.id
+    assert schedule_after[1].id == higher_priority.id

@@ -12,6 +12,8 @@ from .models import (
 )
 from .dispatch_queue import DispatchQueue, SortDirection, SortField, SortRule
 from .operation_dispatcher import OperationDispatcher
+from .operation_dispatcher_api import OperationDispatcherAPI
+from .request_handler import RequestCallback, RequestDecision
 from .runtime_controller import OperationDispatcherRuntimeController
 from .services import (
     DispatcherHistoryService,
@@ -28,23 +30,29 @@ from .visualization import (
 from .diagnostics.history_analyzer import HistoryAnalyzer
 
 try:
-    from .operation_dispatcher_openapi import OperationDispatcherOpenAPI
+    from .operation_dispatcher_openapi import (
+        OperationDispatcherOpenAPI as OperationDispatcherOpenAPI,
+    )
 except ImportError:
     pass
 
 try:
     from .operation_dispatcher_mcp import (
-        DispatcherMCPTools,
-        DispatcherMCPResources,
-        DispatcherMCPPrompts,
-        OperationDispatcherMCPContext,
-        OperationDispatcherMCPServer,
-        OperationDispatcherMCPUtility,
+        DEFAULT_MCP_TOOLS as DEFAULT_MCP_TOOLS,
+        DispatcherMCPTools as DispatcherMCPTools,
+        DispatcherMCPResources as DispatcherMCPResources,
+        DispatcherMCPPrompts as DispatcherMCPPrompts,
+        OperationDispatcherMCPContext as OperationDispatcherMCPContext,
+        OperationDispatcherMCPServer as OperationDispatcherMCPServer,
+        OperationDispatcherMCPUtility as OperationDispatcherMCPUtility,
+        create_operation_dispatcher_mcp_utility as create_operation_dispatcher_mcp_utility,
+        create_operation_dispatcher_mcp_server as create_operation_dispatcher_mcp_server,
     )
 except ImportError:
     pass
 
 _OPTIONAL_MCP_EXPORTS = {
+    "DEFAULT_MCP_TOOLS",
     "DispatcherMCPTools",
     "DispatcherMCPResources",
     "DispatcherMCPPrompts",
@@ -75,7 +83,9 @@ __all__ = [
     "SortDirection",
     "SortRule",
     "OperationDispatcher",
-    "OperationDispatcherReference",
+    "OperationDispatcherAPI",
+    "RequestDecision",
+    "RequestCallback",
     "OperationDispatcherRuntimeController",
     "DispatcherStateStore",
     "DispatcherRuntimeService",
@@ -94,6 +104,7 @@ if "OperationDispatcherOpenAPI" in globals():
 if "OperationDispatcherMCPServer" in globals():
     __all__.extend(
         [
+            "DEFAULT_MCP_TOOLS",
             "DispatcherMCPTools",
             "DispatcherMCPResources",
             "DispatcherMCPPrompts",

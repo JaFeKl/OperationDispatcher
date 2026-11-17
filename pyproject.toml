@@ -1,16 +1,23 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "operation-dispatcher"
-version = "0.1.0"
+version = "0.9.0"
 description = "Lightweight operation dispatcher package for managing and executing operations"
 readme = "README.md"
-license = {file = "LICENSE"}
-requires-python = ">=3.12,<3.13"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.16"
 classifiers = [
-  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Operating System :: OS Independent",
 ]
 dependencies = [
   "pydantic>=2.8,<3.0",
@@ -19,19 +26,29 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "build>=1.2",
+  "twine>=5.0",
+  "ruff>=0.9",
 ]
 api = [
   "flask>=3.0,<4.0",
   "flasgger>=0.9.7.1,<1.0",
 ]
 mcp = [
-  "fastmcp>=2.0",
+  "fastmcp>=2.14.7,<5",
 ]
 vis = [
   "plotly>=6.0,<7.0",
   "numpy>=2.0,<3.0",
-  "pandas>3.0"
+  "pandas>=3.0,<4.0"
 ]
+
+[project.urls]
+Repository = "https://github.com/JaFeKl/OperationScheduler"
+Issues = "https://github.com/JaFeKl/OperationScheduler/issues"
+
+[tool.ruff.lint]
+select = ["F", "E9"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

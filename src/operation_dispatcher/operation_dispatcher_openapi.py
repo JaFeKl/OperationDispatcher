@@ -3,34 +3,23 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Optional
-from uuid import UUID
 
 from flask import jsonify, request
 from flasgger import swag_from
-from pydantic import ValidationError
 
 from .models import (
+    DEFAULT_EVENT_HISTORY_LIMIT,
     DependencyType,
     EventType,
-    ExecutionState,
-    History,
-    Operation,
     TerminationReason,
 )
 from .action_descriptions import OPENAPI_ACTION_DESCRIPTIONS
 from .operation_dispatcher import OperationDispatcher
+from .operation_dispatcher_api import OperationDispatcherAPI
 from .runtime_controller import OperationDispatcherRuntimeController
 
 
-class OperationDispatcherOpenAPI:
-    _LISTABLE_OPERATION_STATES = frozenset(
-        {
-            ExecutionState.QUEUED.value,
-            ExecutionState.RUNNING.value,
-            ExecutionState.PAUSED.value,
-        }
-    )
-
+class OperationDispatcherOpenAPI(OperationDispatcherAPI):
     def __init__(
         self,
         operation_dispatcher: OperationDispatcher,
@@ -39,25 +28,13 @@ class OperationDispatcherOpenAPI:
             OperationDispatcherRuntimeController | None
         ] = None,
     ) -> None:
-        self._operation_dispatcher = operation_dispatcher
-        self._resource_id = operation_dispatcher.dispatch_queue.resource_id
+        super().__init__(operation_dispatcher, runtime_controller=runtime_controller)
         self._default_operation_payload = (
             dict(default_operation_payload)
             if default_operation_payload is not None
             else {}
         )
         self._operation_openapi_definitions: dict[str, Any] = {}
-        if runtime_controller is None:
-            self._runtime_controller = OperationDispatcherRuntimeController(
-                operation_dispatcher=operation_dispatcher,
-                startup_timeout_seconds=1.0,
-                stop_join_timeout_seconds=2.0,
-            )
-        else:
-            self._runtime_controller = runtime_controller
-
-    def _get_runtime_state_payload(self) -> dict[str, Any]:
-        return self._runtime_controller.get_state_payload()
 
     def _build_payload_property_schema(self) -> dict[str, Any]:
         payload_schema: dict[str, Any] = {
@@ -68,571 +45,6 @@ class OperationDispatcherOpenAPI:
             payload_schema["example"] = dict(self._default_operation_payload)
         return payload_schema
 
-    @staticmethod
-    def _error_response(
-        *,
-        message: str,
-        code: str,
-        status_code: int,
-        details: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], int]:
-        payload: dict[str, Any] = {
-            "error": message,
-            "message": message,
-            "code": code,
-        }
-        if details:
-            payload["details"] = details
-        return payload, status_code
-
-    def _build_operation_status_payload(
-        self,
-        operation: Operation,
-    ) -> dict[str, Any]:
-        current_operation = self._operation_dispatcher.current_operation
-        return {
-            "operation": operation.model_dump(mode="json"),
-            "is_current_operation": (
-                current_operation is not None and current_operation.id == operation.id
-            ),
-        }
-
-    def _resolve_operation_status_response(
-        self,
-        operation_id: str,
-    ) -> tuple[dict[str, Any], int]:
-        try:
-            parsed_operation_id = UUID(operation_id)
-        except ValueError as error:
-            return self._error_response(
-                message=str(error),
-                code="invalid_operation_id",
-                status_code=400,
-            )
-
-        operation = self._operation_dispatcher.get_operation(parsed_operation_id)
-        if operation is None:
-            return self._error_response(
-                message="operation not found",
-                code="operation_not_found",
-                status_code=404,
-            )
-
-        return self._build_operation_status_payload(operation), 200
-
-    def list_operations_response(
-        self,
-        state: str | None,
-    ) -> tuple[list[dict[str, Any]] | dict[str, Any], int]:
-        if state is not None:
-            valid_states = self._LISTABLE_OPERATION_STATES
-            if state not in valid_states:
-                return self._error_response(
-                    message=f"invalid state '{state}'",
-                    code="invalid_state",
-                    status_code=400,
-                    details={"valid_states": sorted(valid_states)},
-                )
-
-        operation_by_id: dict[UUID, Operation] = {}
-        current_operation = self._operation_dispatcher.current_operation
-        if current_operation is not None:
-            operation_by_id[current_operation.id] = current_operation
-
-        for operation in self._operation_dispatcher.get_schedule():
-            operation_by_id[operation.id] = operation
-
-        payload: list[dict[str, Any]] = []
-        for operation in operation_by_id.values():
-            if operation.state.value not in self._LISTABLE_OPERATION_STATES:
-                continue
-
-            operation_status = self._build_operation_status_payload(operation)
-
-            if state is not None:
-                if operation.state.value != state:
-                    continue
-
-            payload.append(operation_status)
-
-        return payload, 200
-
-    def get_operation_response(self, operation_id: str) -> tuple[dict[str, Any], int]:
-        return self._resolve_operation_status_response(operation_id)
-
-    def get_current_operation_response(self) -> tuple[dict[str, Any], int]:
-        current_operation = self._operation_dispatcher.current_operation
-        if (
-            current_operation is None
-            or current_operation.state is not ExecutionState.RUNNING
-        ):
-            return self._error_response(
-                message="no running operation",
-                code="no_running_operation",
-                status_code=404,
-            )
-        return self._build_operation_status_payload(current_operation), 200
-
-    def get_operation_events_response(
-        self,
-        operation_id: str,
-    ) -> tuple[list[dict[str, Any]] | dict[str, Any], int]:
-        operation_status_payload, operation_status_code = (
-            self._resolve_operation_status_response(operation_id)
-        )
-        if operation_status_code != 200:
-            return operation_status_payload, operation_status_code
-
-        operation_uuid = UUID(operation_status_payload["operation"]["id"])
-        events = [
-            event.model_dump(mode="json")
-            for event in self._operation_dispatcher._state_store.event_history
-            if event.operation_id == operation_uuid
-        ]
-        return events, 200
-
-    def get_history_response(
-        self,
-        from_time: datetime | None = None,
-        to_time: datetime | None = None,
-        resolve_operations: bool = True,
-        limit: int | None = None,
-    ) -> tuple[dict[str, Any], int]:
-        resolved_limit = 50 if limit is None else limit
-        if resolved_limit < 1:
-            return self._error_response(
-                message="limit must be greater than 0",
-                code="invalid_limit",
-                status_code=400,
-            )
-        if resolved_limit > 1000:
-            return self._error_response(
-                message="limit must be less than or equal to 1000",
-                code="invalid_limit",
-                status_code=400,
-            )
-
-        history = self._operation_dispatcher.get_history(
-            from_time, to_time, resolve_operations, limit=resolved_limit
-        )
-        return history.model_dump(mode="json"), 200
-
-    def add_operation_response(
-        self,
-        request_payload: Any,
-    ) -> tuple[list[dict[str, Any]] | dict[str, Any], int]:
-        if not isinstance(request_payload, list):
-            return self._error_response(
-                message="request body must be a list of scheduled operations",
-                code="invalid_operations",
-                status_code=400,
-            )
-        if len(request_payload) == 0:
-            return self._error_response(
-                message="operations list must not be empty",
-                code="missing_operations",
-                status_code=400,
-            )
-
-        operations: list[Operation] = []
-        for index, operation_request in enumerate(request_payload):
-            if not isinstance(operation_request, dict):
-                return self._error_response(
-                    message="each list item must be a scheduled operation object",
-                    code="invalid_operations",
-                    status_code=400,
-                    details={"index": index},
-                )
-
-            operation_or_error, operation_status = self._build_operation(
-                operation_request
-            )
-            if operation_status != 201:
-                operation_or_error.setdefault("details", {})["index"] = index
-                return operation_or_error, operation_status
-
-            operations.append(operation_or_error)
-
-        payload: list[dict[str, Any]] = []
-        for operation in operations:
-            try:
-                self._operation_dispatcher.add_operation(operation)
-            except (TypeError, ValueError) as error:
-                return self._error_response(
-                    message=str(error),
-                    code="operation_rejected",
-                    status_code=400,
-                )
-            payload.append(self._build_operation_status_payload(operation))
-
-        return payload, 201
-
-    def _build_operation(
-        self,
-        request_payload: dict[str, Any],
-    ) -> tuple[Operation | dict[str, Any], int]:
-        if "resource_id" in request_payload:
-            return self._error_response(
-                message="resource_id must not be provided; it is assigned by the dispatcher resource",
-                code="resource_id_not_allowed",
-                status_code=400,
-            )
-
-        payload = request_payload.get("payload")
-        if payload is None:
-            return self._error_response(
-                message="payload is required",
-                code="missing_payload",
-                status_code=400,
-            )
-
-        if not isinstance(payload, dict):
-            return self._error_response(
-                message="payload must be an object",
-                code="invalid_payload",
-                status_code=400,
-            )
-
-        try:
-            operation = Operation.model_validate(
-                {
-                    "job_id": request_payload.get("job_id"),
-                    "payload": payload,
-                    "resource_id": self._resource_id,
-                    "priority": request_payload.get("priority", 0),
-                    "release_date": request_payload.get("release_date"),
-                    "planned_duration": request_payload.get("planned_duration"),
-                    "due_date": request_payload.get("due_date"),
-                    "dependencies": request_payload.get("dependencies", []),
-                }
-            )
-        except (ValidationError, TypeError, ValueError) as error:
-            return self._error_response(
-                message=str(error),
-                code="invalid_operation",
-                status_code=400,
-            )
-
-        return operation, 201
-
-    def _parse_meta_data(
-        self,
-        payload: dict[str, Any],
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int]:
-        meta_data = payload.get("meta_data")
-        if meta_data is None:
-            return None, None, 200
-        if not isinstance(meta_data, dict):
-            error_payload, status_code = self._error_response(
-                message="meta_data must be an object",
-                code="invalid_meta_data",
-                status_code=400,
-            )
-            return None, error_payload, status_code
-        return dict(meta_data), None, 200
-
-    def _parse_termination_reason(
-        self,
-        payload: dict[str, Any],
-    ) -> tuple[TerminationReason, dict[str, Any] | None, int]:
-        raw_termination_reason = payload.get("termination_reason")
-        if raw_termination_reason is None:
-            return TerminationReason.INTERNAL_ERROR, None, 200
-
-        if isinstance(raw_termination_reason, TerminationReason):
-            return raw_termination_reason, None, 200
-
-        try:
-            return TerminationReason(str(raw_termination_reason)), None, 200
-        except ValueError:
-            error_payload, status_code = self._error_response(
-                message="invalid termination_reason",
-                code="invalid_termination_reason",
-                status_code=400,
-                details={
-                    "valid_termination_reasons": [
-                        reason.value for reason in TerminationReason
-                    ]
-                },
-            )
-            return TerminationReason.INTERNAL_ERROR, error_payload, status_code
-
-    def cancel_operation_response(
-        self,
-        operation_id: str,
-        command_payload: Any = None,
-    ) -> tuple[dict[str, Any], int]:
-        if command_payload is None:
-            resolved_command_payload: dict[str, Any] = {}
-        elif isinstance(command_payload, dict):
-            resolved_command_payload = command_payload
-        else:
-            return self._error_response(
-                message="request body must be an object",
-                code="invalid_request_body",
-                status_code=400,
-            )
-
-        meta_data, meta_data_error, meta_data_status = self._parse_meta_data(
-            resolved_command_payload
-        )
-        if meta_data_error is not None:
-            return meta_data_error, meta_data_status
-
-        (
-            termination_reason,
-            termination_reason_error,
-            termination_reason_status,
-        ) = self._parse_termination_reason(resolved_command_payload)
-        if termination_reason_error is not None:
-            return termination_reason_error, termination_reason_status
-
-        try:
-            parsed_operation_id = UUID(operation_id)
-        except ValueError as error:
-            return self._error_response(
-                message=str(error),
-                code="invalid_operation_id",
-                status_code=400,
-            )
-
-        existing_operation = self._operation_dispatcher.get_operation(
-            parsed_operation_id
-        )
-        if existing_operation is None:
-            return self._error_response(
-                message="operation not found",
-                code="operation_not_found",
-                status_code=404,
-            )
-
-        cancelled_operation = self._operation_dispatcher.cancel_operation(
-            parsed_operation_id,
-            termination_reason=termination_reason,
-            meta_data=meta_data,
-        )
-        if cancelled_operation is None:
-            return self._error_response(
-                message="operation cancellation denied",
-                code="operation_cancellation_denied",
-                status_code=409,
-            )
-
-        return self._build_operation_status_payload(cancelled_operation), 200
-
-    def update_operation_response(
-        self,
-        operation_id: str,
-        updates_payload: Any,
-    ) -> tuple[dict[str, Any], int]:
-        if not isinstance(updates_payload, dict):
-            return self._error_response(
-                message="request body must be an object of updates",
-                code="invalid_updates",
-                status_code=400,
-            )
-
-        try:
-            parsed_operation_id = UUID(operation_id)
-        except ValueError as error:
-            return self._error_response(
-                message=str(error),
-                code="invalid_operation_id",
-                status_code=400,
-            )
-
-        existing_operation = self._operation_dispatcher.get_operation(
-            parsed_operation_id
-        )
-        if existing_operation is None:
-            return self._error_response(
-                message="operation not found",
-                code="operation_not_found",
-                status_code=404,
-            )
-
-        try:
-            updated_operation = self._operation_dispatcher.update_operation(
-                parsed_operation_id,
-                updates_payload,
-            )
-        except RuntimeError as error:
-            if str(error) == "cannot update a running operation":
-                return self._error_response(
-                    message="cannot update a running operation",
-                    code="operation_update_denied",
-                    status_code=409,
-                )
-            return self._error_response(
-                message=str(error),
-                code="operation_update_failed",
-                status_code=409,
-            )
-        except (TypeError, ValueError, ValidationError) as error:
-            return self._error_response(
-                message=str(error),
-                code="invalid_updates",
-                status_code=400,
-            )
-
-        if updated_operation is None:
-            return self._error_response(
-                message="operation not found",
-                code="operation_not_found",
-                status_code=404,
-            )
-
-        return self._build_operation_status_payload(updated_operation), 200
-
-    def pause_operation_response(
-        self,
-        operation_id: str,
-        command_payload: Any = None,
-    ) -> tuple[dict[str, Any], int]:
-        if command_payload is None:
-            resolved_command_payload: dict[str, Any] = {}
-        elif isinstance(command_payload, dict):
-            resolved_command_payload = command_payload
-        else:
-            return self._error_response(
-                message="request body must be an object",
-                code="invalid_request_body",
-                status_code=400,
-            )
-
-        meta_data, meta_data_error, meta_data_status = self._parse_meta_data(
-            resolved_command_payload
-        )
-        if meta_data_error is not None:
-            return meta_data_error, meta_data_status
-
-        operation_status_payload, operation_status_code = (
-            self._resolve_operation_status_response(operation_id)
-        )
-        if operation_status_code != 200:
-            return operation_status_payload, operation_status_code
-
-        operation_payload = operation_status_payload.get("operation")
-        if (
-            not isinstance(operation_payload, dict)
-            or operation_payload.get("state") != ExecutionState.RUNNING.value
-        ):
-            return self._error_response(
-                message="operation is not running",
-                code="operation_not_running",
-                status_code=409,
-            )
-
-        try:
-            operation_uuid = UUID(operation_status_payload["operation"]["id"])
-            is_paused = self._operation_dispatcher.pause_operation(
-                operation_uuid,
-                meta_data=meta_data,
-            )
-        except RuntimeError as error:
-            if str(error) == "current operation is not running":
-                return self._error_response(
-                    message="operation is not running",
-                    code="operation_not_running",
-                    status_code=409,
-                )
-            return self._error_response(
-                message="operation pause failed",
-                code="operation_pause_failed",
-                status_code=409,
-            )
-
-        if not is_paused:
-            return self._error_response(
-                message="operation pause denied",
-                code="operation_pause_denied",
-                status_code=409,
-            )
-
-        return self._resolve_operation_status_response(operation_id)
-
-    def resume_operation_response(
-        self,
-        operation_id: str,
-        command_payload: Any = None,
-    ) -> tuple[dict[str, Any], int]:
-        if command_payload is None:
-            resolved_command_payload: dict[str, Any] = {}
-        elif isinstance(command_payload, dict):
-            resolved_command_payload = command_payload
-        else:
-            return self._error_response(
-                message="request body must be an object",
-                code="invalid_request_body",
-                status_code=400,
-            )
-
-        meta_data, meta_data_error, meta_data_status = self._parse_meta_data(
-            resolved_command_payload
-        )
-        if meta_data_error is not None:
-            return meta_data_error, meta_data_status
-
-        operation_status_payload, operation_status_code = (
-            self._resolve_operation_status_response(operation_id)
-        )
-        if operation_status_code != 200:
-            return operation_status_payload, operation_status_code
-
-        operation_payload = operation_status_payload.get("operation")
-        if (
-            not isinstance(operation_payload, dict)
-            or operation_payload.get("state") != ExecutionState.PAUSED.value
-        ):
-            return self._error_response(
-                message="operation is not paused",
-                code="operation_not_paused",
-                status_code=409,
-            )
-
-        try:
-            operation_uuid = UUID(operation_status_payload["operation"]["id"])
-            is_resumed = self._operation_dispatcher.resume_operation(
-                operation_uuid,
-                meta_data=meta_data,
-            )
-        except RuntimeError as error:
-            if str(error) == "current operation is not paused":
-                return self._error_response(
-                    message="operation is not paused",
-                    code="operation_not_paused",
-                    status_code=409,
-                )
-            return self._error_response(
-                message="operation resume failed",
-                code="operation_resume_failed",
-                status_code=409,
-            )
-
-        if not is_resumed:
-            return self._error_response(
-                message="operation resume denied",
-                code="operation_resume_denied",
-                status_code=409,
-            )
-
-        return self._resolve_operation_status_response(operation_id)
-
-    def get_operation_dispatcher_state_response(self) -> tuple[dict[str, Any], int]:
-        return self._get_runtime_state_payload(), 200
-
-    def start_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        return self._runtime_controller.start()
-
-    def stop_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        return self._runtime_controller.stop()
-
-    def pause_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        return self._runtime_controller.pause()
-
-    def resume_operation_dispatcher_response(self) -> tuple[dict[str, Any], int]:
-        return self._runtime_controller.resume()
-
     def register_default_endpoints(self, app: Any) -> None:
         self.register_list_operations_endpoint(app)
         self.register_get_current_operation_endpoint(app)
@@ -642,6 +54,7 @@ class OperationDispatcherOpenAPI:
         self.register_add_operation_endpoint(app)
         self.register_update_operation_endpoint(app)
         self.register_cancel_operation_endpoint(app)
+        self.register_complete_operation_endpoint(app)
         self.register_pause_operation_endpoint(app)
         self.register_resume_operation_endpoint(app)
 
@@ -782,13 +195,6 @@ class OperationDispatcherOpenAPI:
                     return to_time_error, to_time_status
                 to_time = parsed_to_time
 
-            if from_time is not None and to_time is not None and from_time > to_time:
-                return self._error_response(
-                    message="from_time must be less than or equal to to_time",
-                    code="invalid_time_range",
-                    status_code=400,
-                )
-
             resolve_operations = True
             resolve_operations_value = request.args.get("resolve_operations")
             if resolve_operations_value is not None:
@@ -816,7 +222,9 @@ class OperationDispatcherOpenAPI:
             method="GET",
             route=route,
             endpoint_name=endpoint_name,
-            openapi_spec=self.get_history_openapi_spec(),
+            openapi_spec=self.get_history_openapi_spec(
+                self._operation_dispatcher.event_history_limit
+            ),
             response_handler=response_handler,
         )
 
@@ -868,6 +276,24 @@ class OperationDispatcherOpenAPI:
             openapi_spec=self.add_operation_openapi_spec(),
             response_handler=lambda: self.add_operation_response(
                 self._parse_json_body()
+            ),
+        )
+
+    def register_complete_operation_endpoint(
+        self,
+        app: Any,
+        route: str = "/operations/<operation_id>/complete",
+        endpoint_name: str = "complete_operation",
+    ) -> None:
+        self._register_json_endpoint(
+            app,
+            method="POST",
+            route=route,
+            endpoint_name=endpoint_name,
+            openapi_spec=self.complete_operation_openapi_spec(),
+            response_handler=lambda: self.complete_operation_response(
+                operation_id=request.view_args.get("operation_id", ""),
+                command_payload=self._parse_json_body(),
             ),
         )
 
@@ -1124,7 +550,9 @@ class OperationDispatcherOpenAPI:
         }
 
     @staticmethod
-    def get_history_openapi_spec() -> dict[str, Any]:
+    def get_history_openapi_spec(
+        event_history_limit: int = DEFAULT_EVENT_HISTORY_LIMIT,
+    ) -> dict[str, Any]:
         return {
             "tags": ["Operations"],
             "description": OPENAPI_ACTION_DESCRIPTIONS["get_history"].description,
@@ -1156,9 +584,9 @@ class OperationDispatcherOpenAPI:
                     "in": "query",
                     "required": False,
                     "type": "integer",
-                    "default": 50,
+                    "default": min(50, event_history_limit),
                     "minimum": 1,
-                    "maximum": 1000,
+                    "maximum": event_history_limit,
                 },
             ],
             "responses": {
@@ -1197,6 +625,38 @@ class OperationDispatcherOpenAPI:
                     },
                 },
                 400: {"schema": {"$ref": "#/definitions/ErrorResponse"}},
+            },
+        }
+
+    @staticmethod
+    def complete_operation_openapi_spec() -> dict[str, Any]:
+        return {
+            "tags": ["Operations"],
+            "description": OPENAPI_ACTION_DESCRIPTIONS[
+                "complete_operation"
+            ].description,
+            "consumes": ["application/json"],
+            "produces": ["application/json"],
+            "parameters": [
+                {
+                    "name": "operation_id",
+                    "in": "path",
+                    "required": True,
+                    "type": "string",
+                    "format": "uuid",
+                },
+                {
+                    "in": "body",
+                    "name": "body",
+                    "required": True,
+                    "schema": {"$ref": "#/definitions/CompleteOperationCommand"},
+                },
+            ],
+            "responses": {
+                200: {"schema": {"$ref": "#/definitions/OperationStatus"}},
+                400: {"schema": {"$ref": "#/definitions/ErrorResponse"}},
+                404: {"schema": {"$ref": "#/definitions/ErrorResponse"}},
+                409: {"schema": {"$ref": "#/definitions/ErrorResponse"}},
             },
         }
 
@@ -1704,11 +1164,31 @@ class OperationDispatcherOpenAPI:
             },
             "UpdateOperationItem": {
                 "type": "object",
-                "additionalProperties": True,
+                "additionalProperties": False,
+                "description": "Partial payload or scheduling updates. Only QUEUED and PAUSED operations may be changed; lifecycle fields are read-only.",
                 "example": {
                     "priority": 2,
                     "payload": {"task": "updated"},
                 },
+            },
+            "CompleteOperationCommand": {
+                "type": "object",
+                "required": ["outcome"],
+                "properties": {
+                    "outcome": {"type": "string", "enum": ["SUCCESS", "FAILURE"]},
+                    "termination_reason": {
+                        "type": "string",
+                        "enum": [reason.value for reason in TerminationReason],
+                        "x-nullable": True,
+                        "description": "Defaults to NONE for SUCCESS (the only allowed reason), or INTERNAL_ERROR for FAILURE.",
+                    },
+                    "meta_data": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "default": {},
+                    },
+                },
+                "example": {"outcome": "SUCCESS", "meta_data": {}},
             },
             "LifecycleCommand": {
                 "type": "object",
@@ -1744,5 +1224,14 @@ class OperationDispatcherOpenAPI:
             },
         }
 
+        definitions["UpdateOperationItem"]["properties"] = {
+            field: dict(definitions["Operation"]["properties"][field])
+            for field in sorted(self._operation_dispatcher.updatable_fields)
+        }
+        for field in ("release_date", "due_date", "planned_duration"):
+            if field in definitions["UpdateOperationItem"]["properties"]:
+                definitions["UpdateOperationItem"]["properties"][field][
+                    "x-nullable"
+                ] = True
         definitions.update(self._operation_openapi_definitions)
         return definitions

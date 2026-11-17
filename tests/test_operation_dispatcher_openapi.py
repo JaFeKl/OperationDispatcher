@@ -5,6 +5,9 @@ from uuid import uuid4
 
 import pytest
 
+pytest.importorskip("flask")
+pytest.importorskip("flasgger")
+
 from operation_dispatcher import (
     ExecutionState,
     OperationDispatcher,
@@ -13,6 +16,18 @@ from operation_dispatcher import (
     TerminationReason,
 )
 from operation_dispatcher.action_descriptions import OPENAPI_ACTION_DESCRIPTIONS
+
+
+def test_update_schema_only_exposes_configured_editable_fields():
+    dispatcher = OperationDispatcher(
+        "resource-a", updatable_fields=["payload", "due_date"]
+    )
+    schema = OperationDispatcherOpenAPI(dispatcher).get_openapi_definitions()[
+        "UpdateOperationItem"
+    ]
+    assert set(schema["properties"]) == {"payload", "due_date"}
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["due_date"]["x-nullable"] is True
 
 
 def _operation(
@@ -639,6 +654,7 @@ def test_openapi_specs_use_centralized_action_descriptions() -> None:
         "get_history": (OperationDispatcherOpenAPI.get_history_openapi_spec()),
         "add_operation": OperationDispatcherOpenAPI.add_operation_openapi_spec(),
         "cancel_operation": OperationDispatcherOpenAPI.cancel_operation_openapi_spec(),
+        "complete_operation": OperationDispatcherOpenAPI.complete_operation_openapi_spec(),
         "update_operation": OperationDispatcherOpenAPI.update_operation_openapi_spec(),
         "pause_operation": OperationDispatcherOpenAPI.pause_operation_openapi_spec(),
         "resume_operation": OperationDispatcherOpenAPI.resume_operation_openapi_spec(),

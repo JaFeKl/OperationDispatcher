@@ -1,0 +1,65 @@
+name: Publish release to PyPI
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-version:
+    name: Check release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Match tag to package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          expected_tag = f"v{project['version']}"
+          actual_tag = os.environ["RELEASE_TAG"]
+          if actual_tag != expected_tag:
+              raise SystemExit(
+                  f"Release tag {actual_tag!r} does not match package version: "
+                  f"expected {expected_tag!r}."
+              )
+          print(f"Validated {project['name']} {project['version']}")
+          PY
+
+  test-release:
+    name: Build and test release
+    needs: validate-version
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish tested distributions
+    needs: test-release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/operation-dispatcher/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Use the artifacts built and tested in this run; do not rebuild at publication.
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Publish to PyPI using Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

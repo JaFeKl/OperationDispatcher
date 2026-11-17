@@ -5,10 +5,13 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from collections.abc import Callable
-from uuid import UUID
 
 from operation_dispatcher.dispatch_queue import DispatchQueue
-from operation_dispatcher.models import DispatchEvent, History
+from operation_dispatcher.models import (
+    DEFAULT_EVENT_HISTORY_LIMIT,
+    DispatchEvent,
+    History,
+)
 from operation_dispatcher.notification_handler import NotificationHandler
 from operation_dispatcher.request_handler import RequestHandler
 
@@ -36,12 +39,13 @@ class DispatcherStateStore:
 
     is_paused: bool = False
     stop_requested: bool = False
+    start_request_pending: bool = False
     running_since: datetime | None = None
     runtime_loop: asyncio.AbstractEventLoop | None = None
     wakeup_event: asyncio.Event | None = None
 
     event_history: list[DispatchEvent] = field(default_factory=list)
-    event_history_limit: int = 1000
+    event_history_limit: int = DEFAULT_EVENT_HISTORY_LIMIT
 
     notification_handler: NotificationHandler | None = None
     request_handler: RequestHandler | None = None

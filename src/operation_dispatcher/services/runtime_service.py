@@ -64,9 +64,6 @@ class DispatcherRuntimeService:
 
     def _pause_internal(self) -> None:
         self._state_store.is_paused = True
-        current = self.current_operation
-        if current is not None:
-            current.state = ExecutionState.PAUSED
         self._event_service.emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
 
     def resume_dispatcher_runtime(self) -> None:
@@ -87,9 +84,35 @@ class DispatcherRuntimeService:
         self.notify_wakeup()
 
     async def step_dispatch(self) -> Operation | None:
-        if self._state_store.is_paused or self.current_operation is not None:
+        selected = self._mutation_service.execute(self._prepare_start)
+        if selected is None:
             return None
+        operation, snapshot = selected
+        try:
+            request_handler = self._state_store.request_handler
+            if (
+                request_handler is None
+                or not await request_handler.request_operation_start(snapshot)
+            ):
+                return None
+            return self._mutation_service.execute(
+                lambda: self._start_next(operation, snapshot)
+            )
+        finally:
+            self._mutation_service.execute(self._clear_pending_start)
 
+    def _clear_pending_start(self) -> None:
+        self._state_store.start_request_pending = False
+        self.notify_wakeup()
+
+    def _prepare_start(self) -> tuple[Operation, Operation] | None:
+        if (
+            self._state_store.is_paused
+            or self._state_store.stop_requested
+            or self.current_operation is not None
+            or self._state_store.start_request_pending
+        ):
+            return None
         next_operation = self._state_store.dispatch_queue.peek()
         if next_operation is None:
             return None
@@ -106,17 +129,22 @@ class DispatcherRuntimeService:
         if request_handler.has_request_cooldown(next_operation):
             return None
 
-        if not await request_handler.request_operation_start(next_operation):
+        self._state_store.start_request_pending = True
+        return next_operation, next_operation.model_copy(deep=True)
+
+    def _start_next(self, approved: Operation, snapshot: Operation) -> Operation | None:
+        if (
+            self._state_store.is_paused
+            or self._state_store.stop_requested
+            or self.current_operation is not None
+        ):
             return None
-
-        return self._start_next()
-
-    def _start_next(self) -> Operation | None:
-        if self._state_store.is_paused:
+        # Queue edits, cancellation or payload changes invalidate this approval.
+        if (
+            self._state_store.dispatch_queue.peek() is not approved
+            or approved.model_dump() != snapshot.model_dump()
+        ):
             return None
-
-        if self.current_operation is not None:
-            raise RuntimeError("an operation is already running")
 
         operation = self._state_store.dispatch_queue.next()
         if operation is None:
@@ -132,19 +160,10 @@ class DispatcherRuntimeService:
             operation=operation,
             old_operation=old_operation,
         )
-        return operation
+        return operation.model_copy(deep=True)
 
     async def run(self, start_paused: bool) -> None:
-        if self.is_running:
-            raise RuntimeError("operation dispatcher is already running")
-
-        self._state_store.running_since = datetime.now(timezone.utc)
-        self._state_store.stop_requested = False
-        self._state_store.runtime_loop = asyncio.get_running_loop()
-        self._state_store.wakeup_event = asyncio.Event()
-        self._event_service.emit_event(EventType.OPERATION_DISPATCHER_STARTED)
-        if start_paused:
-            self._event_service.emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
+        self._mutation_service.execute(lambda: self._begin_run(start_paused))
         try:
             while not self._state_store.stop_requested:
                 try:
@@ -162,13 +181,28 @@ class DispatcherRuntimeService:
 
                 await self._wait_for_next_signal()
         finally:
-            self._state_store.running_since = None
-            self._event_service.emit_event(EventType.OPERATION_DISPATCHER_STOPPED)
-            self._state_store.runtime_loop = None
-            self._state_store.wakeup_event = None
+            self._mutation_service.execute(self._finish_run)
+
+    def _begin_run(self, start_paused: bool) -> None:
+        if self.is_running:
+            raise RuntimeError("operation dispatcher is already running")
+
+        self._state_store.running_since = datetime.now(timezone.utc)
+        self._state_store.stop_requested = False
+        self._state_store.runtime_loop = asyncio.get_running_loop()
+        self._state_store.wakeup_event = asyncio.Event()
+        self._event_service.emit_event(EventType.OPERATION_DISPATCHER_STARTED)
+        if start_paused:
+            self._event_service.emit_event(EventType.OPERATION_DISPATCHER_PAUSED)
+
+    def _finish_run(self) -> None:
+        self._state_store.running_since = None
+        self._event_service.emit_event(EventType.OPERATION_DISPATCHER_STOPPED)
+        self._state_store.runtime_loop = None
+        self._state_store.wakeup_event = None
 
     async def _wait_for_next_signal(self) -> None:
-        wait_seconds = self._next_wait_seconds()
+        wait_seconds = self._mutation_service.execute(self._next_wait_seconds)
         if wait_seconds == 0:
             await asyncio.sleep(0)
             return
@@ -194,7 +228,11 @@ class DispatcherRuntimeService:
             wakeup_event.clear()
 
     def _next_wait_seconds(self) -> float | None:
-        if self._state_store.is_paused:
+        if (
+            self._state_store.is_paused
+            or self.current_operation is not None
+            or self._state_store.start_request_pending
+        ):
             return None
 
         next_operation = self._state_store.dispatch_queue.peek()

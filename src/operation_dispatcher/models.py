@@ -6,6 +6,8 @@ from typing import Any
 from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
 
+DEFAULT_EVENT_HISTORY_LIMIT = 1000
+
 
 def _normalize_to_utc(value: datetime | None) -> datetime | None:
     if value is None:
@@ -38,6 +40,28 @@ class TerminationReason(str, Enum):
     EXTERNAL_ERROR = "EXTERNAL_ERROR"
 
 
+class CompleteOperationCommand(BaseModel):
+    """Validated request to finish the current operation after approval."""
+
+    outcome: ExecutionOutcome
+    termination_reason: TerminationReason | None = None
+    meta_data: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_completion(self) -> CompleteOperationCommand:
+        if self.outcome not in (ExecutionOutcome.SUCCESS, ExecutionOutcome.FAILURE):
+            raise ValueError("outcome must be SUCCESS or FAILURE")
+        if self.outcome is ExecutionOutcome.SUCCESS:
+            if self.termination_reason not in (None, TerminationReason.NONE):
+                raise ValueError(
+                    "successful completion requires termination_reason NONE"
+                )
+            self.termination_reason = TerminationReason.NONE
+        elif self.termination_reason is None:
+            self.termination_reason = TerminationReason.INTERNAL_ERROR
+        return self
+
+
 class EventType(str, Enum):
     OPERATION_DISPATCHER_STARTED = "operation_dispatcher_started"
     OPERATION_DISPATCHER_STOPPED = "operation_dispatcher_stopped"
@@ -52,6 +76,8 @@ class EventType(str, Enum):
     OPERATION_PAUSE_DENIED = "operation_pause_denied"
     OPERATION_RESUME_REQUESTED = "operation_resume_requested"
     OPERATION_RESUME_DENIED = "operation_resume_denied"
+    OPERATION_COMPLETE_REQUESTED = "operation_complete_requested"
+    OPERATION_COMPLETE_DENIED = "operation_complete_denied"
 
     OPERATION_ADDED = "operation_added"
     OPERATION_UPDATED = "operation_updated"
@@ -127,6 +153,11 @@ class Operation(BaseModel):
 
     @model_validator(mode="after")
     def validate_dates(self) -> "Operation":
+        if any(
+            dependency.depends_on_operation_id == self.id
+            for dependency in self.dependencies
+        ):
+            raise ValueError("operation cannot depend on itself")
         self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
         self.release_date = _normalize_to_utc(self.release_date)  # type: ignore[assignment]
         self.due_date = _normalize_to_utc(self.due_date)  # type: ignore[assignment]
@@ -167,8 +198,6 @@ class OperationDependency(BaseModel):
     @model_validator(mode="after")
     def validate_unique_dependency(self) -> OperationDependency:
         self.created_at = _normalize_to_utc(self.created_at)  # type: ignore[assignment]
-        if self.depends_on_operation_id == self.id:
-            raise ValueError("operation cannot depend on itself")
         return self
 
 

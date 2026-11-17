@@ -11,7 +11,6 @@ from operation_dispatcher import (
     OperationDispatcherRuntimeController,
     Operation,
     SimulatedOperationRunner,
-    DispatcherMCPTools,
     DispatcherMCPResources,
     DispatcherMCPPrompts,
 )
@@ -42,7 +41,7 @@ class DemoDispatcherMCPService:
             name="Operation Dispatcher MCP Server",
             instructions="This is an example MCP server exposing an OperationDispatcher instance.",
             host=host,
-            tools=list(DispatcherMCPTools),
+            runtime_controller=self._runtime_controller,
             resources=list(DispatcherMCPResources),
             prompts=list(DispatcherMCPPrompts),
             json_response=True,
@@ -72,7 +71,10 @@ class DemoDispatcherMCPService:
                 run_seconds=float(operation.payload.get("run_seconds", 2.0)),
             )
 
-        elif event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
+        elif event.event_type in {
+            EventType.OPERATION_CANCEL_REQUESTED,
+            EventType.OPERATION_COMPLETE_REQUESTED,
+        }:
             return self._simulated_runner.cancel(operation_id=operation.id)
 
         elif event.event_type is EventType.OPERATION_PAUSE_REQUESTED:

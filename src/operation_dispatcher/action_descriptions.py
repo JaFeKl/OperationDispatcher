@@ -8,7 +8,7 @@ class ActionDescription:
     description: str
 
 
-OPENAPI_ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
+ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
     "list_operations": ActionDescription(
         description="Returns currently active operations (QUEUED, RUNNING, PAUSED)."
     ),
@@ -22,7 +22,7 @@ OPENAPI_ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
         description="Returns the ordered lifecycle event history emitted for the specified operation."
     ),
     "get_history": ActionDescription(
-        description="Returns event and operation history matching the requested time window."
+        description="Returns event and operation history matching the requested time window. The limit must be between 1 and the dispatcher's configured event_history_limit; the default is the smaller of 50 and that limit."
     ),
     "add_operation": ActionDescription(
         description="Adds one or more operations to the dispatcher queue and emits operation-added lifecycle events for accepted items."
@@ -30,8 +30,11 @@ OPENAPI_ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
     "cancel_operation": ActionDescription(
         description="Requests cancellation of a operation."
     ),
+    "complete_operation": ActionDescription(
+        description="Requests application approval to complete the current RUNNING or PAUSED operation with SUCCESS or FAILURE. Requires a configured approval callback."
+    ),
     "update_operation": ActionDescription(
-        description="Applies partial updates to a queued and non-running operation."
+        description="Updates payload or scheduling fields on a QUEUED or PAUSED operation. Lifecycle fields and completed operations cannot be updated."
     ),
     "pause_operation": ActionDescription(
         description="Requests pausing an operation. The operation must be currently running to be paused."
@@ -49,9 +52,12 @@ OPENAPI_ACTION_DESCRIPTIONS: dict[str, ActionDescription] = {
         description="Stops the dispatcher. No new operations are being dispatched until restarted. Running operations are not affected and will continue to run until completion or cancellation."
     ),
     "pause_operation_dispatcher": ActionDescription(
-        description="Pauses the dispatcher. No new operations are being dispatched until resumed. "
+        description="Pauses dispatching new operations until resumed. The active operation's state is unchanged; use the operation pause request to pause active work."
     ),
     "resume_operation_dispatcher": ActionDescription(
         description="Resumes a paused dispatcher, allowing it to dispatch queued operations again."
     ),
 }
+
+# Preserve the original public name for OpenAPI integrations.
+OPENAPI_ACTION_DESCRIPTIONS = ACTION_DESCRIPTIONS

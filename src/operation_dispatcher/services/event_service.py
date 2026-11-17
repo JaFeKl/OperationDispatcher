@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 from uuid import UUID
 
@@ -35,7 +36,7 @@ class DispatcherEventService:
         old_operation: Operation | None = None,
         notify: bool = True,
     ) -> DispatchEvent:
-        resolved_meta_data = {} if meta_data is None else dict(meta_data)
+        resolved_meta_data = {} if meta_data is None else deepcopy(meta_data)
         resolved_changes = (
             get_changes(old_operation, operation)
             if old_operation is not None and operation is not None
@@ -59,7 +60,7 @@ class DispatcherEventService:
         self.log_event(event)
         notification_handler = self._state_store.notification_handler
         if notify and notification_handler is not None:
-            notification_handler.notify(event)
+            notification_handler.notify(event.model_copy(deep=True))
         self._notify_wakeup()
         return event
 

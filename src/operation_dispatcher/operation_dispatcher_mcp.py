@@ -1,16 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime
-from collections.abc import AsyncIterator
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
-from uuid import UUID
+from functools import wraps
+from inspect import signature
+from typing import Any, Literal, get_args
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.prompts import Message
-from operation_dispatcher.operation_dispatcher import OperationDispatcher
+
+from .action_descriptions import ACTION_DESCRIPTIONS
+from .operation_dispatcher import OperationDispatcher
+from .operation_dispatcher_api import OperationDispatcherAPI
+from .runtime_controller import OperationDispatcherRuntimeController
 
 
 @dataclass(slots=True, frozen=True)
@@ -25,6 +33,56 @@ class DispatcherMCPTools(str, Enum):
     PAUSE_OPERATION_DISPATCHER = "dispatcher_pause_runtime"
     RESUME_OPERATION_DISPATCHER = "dispatcher_resume_runtime"
     GET_HISTORY = "dispatcher_get_history"
+    LIST_OPERATIONS = "dispatcher_list_operations"
+    GET_OPERATION = "dispatcher_get_operation"
+    GET_CURRENT_OPERATION = "dispatcher_get_current_operation"
+    GET_OPERATION_EVENTS = "dispatcher_get_operation_events"
+    ADD_OPERATIONS = "dispatcher_add_operations"
+    UPDATE_OPERATION = "dispatcher_update_operation"
+    CANCEL_OPERATION = "dispatcher_cancel_operation"
+    PAUSE_OPERATION = "dispatcher_pause_operation"
+    RESUME_OPERATION = "dispatcher_resume_operation"
+    REQUEST_OPERATION_COMPLETION = "dispatcher_request_operation_completion"
+    START_OPERATION_DISPATCHER = "dispatcher_start_runtime"
+    STOP_OPERATION_DISPATCHER = "dispatcher_stop_runtime"
+
+
+DEFAULT_MCP_TOOLS = tuple(
+    tool
+    for tool in DispatcherMCPTools
+    if tool
+    not in {
+        DispatcherMCPTools.START_OPERATION_DISPATCHER,
+        DispatcherMCPTools.STOP_OPERATION_DISPATCHER,
+    }
+)
+
+
+def _mcp_payload(response: tuple[Any, int]) -> Any:
+    """Keep API payloads intact; report unsuccessful statuses as MCP tool errors."""
+    payload, status = response
+    if status >= 400:
+        raise ToolError(json.dumps(payload))
+    return payload
+
+
+def _as_mcp_tool(handler: Callable[..., tuple[Any, int]]) -> Callable[..., Any]:
+    @wraps(handler)
+    async def call(**kwargs: Any) -> Any:
+        # Approval callbacks and runtime control can block. Keep the MCP loop free.
+        return _mcp_payload(await asyncio.to_thread(handler, **kwargs))
+
+    # Reuse the handler's parameters for discovery; the transport removes status.
+    handler_signature = signature(handler, eval_str=True)
+    payload_type = get_args(handler_signature.return_annotation)[0]
+    tool_signature = handler_signature.replace(return_annotation=payload_type)
+    call.__signature__ = tool_signature
+    call.__annotations__ = {
+        name: parameter.annotation
+        for name, parameter in tool_signature.parameters.items()
+    }
+    call.__annotations__["return"] = payload_type
+    return call
 
 
 class DispatcherMCPResources(str, Enum):
@@ -45,8 +103,13 @@ class DispatcherMCPPrompts(str, Enum):
 class OperationDispatcherMCPUtility:
     """Register dispatcher MCP tools/resources/prompts onto an existing `FastMCP` app."""
 
-    def __init__(self, operation_dispatcher: OperationDispatcher) -> None:
+    def __init__(
+        self,
+        operation_dispatcher: OperationDispatcher,
+        runtime_controller: OperationDispatcherRuntimeController | None = None,
+    ) -> None:
         self._operation_dispatcher = operation_dispatcher
+        self._api = OperationDispatcherAPI(operation_dispatcher, runtime_controller)
 
     @property
     def operation_dispatcher(self) -> OperationDispatcher:
@@ -59,7 +122,7 @@ class OperationDispatcherMCPUtility:
         resources: list[DispatcherMCPResources] | None = None,
         prompts: list[DispatcherMCPPrompts] | None = None,
     ) -> None:
-        resolved_tools = tools if tools is not None else list(DispatcherMCPTools)
+        resolved_tools = tools if tools is not None else list(DEFAULT_MCP_TOOLS)
         resolved_resources = (
             resources if resources is not None else list(DispatcherMCPResources)
         )
@@ -74,51 +137,32 @@ class OperationDispatcherMCPUtility:
         self.register_prompts(mcp, resolved_prompts)
 
     def register_tools(self, mcp: FastMCP, tools: list[DispatcherMCPTools]) -> None:
-        if DispatcherMCPTools.GET_DISPATCHER_STATE in tools:
-
-            @mcp.tool(
-                name=DispatcherMCPTools.GET_DISPATCHER_STATE.value,
-                description="Return the current state of the shared operation dispatcher.",
-            )
-            def get_dispatcher_state() -> dict[str, Any]:
-                return self._dispatcher_state_payload()
-
-        if DispatcherMCPTools.PAUSE_OPERATION_DISPATCHER in tools:
-
-            @mcp.tool(
-                name=DispatcherMCPTools.PAUSE_OPERATION_DISPATCHER.value,
-                description="Pause the operation dispatcher runtime loop.",
-            )
-            def pause_operation_dispatcher() -> dict[str, Any]:
-                return self.pause_dispatcher_runtime()
-
-        if DispatcherMCPTools.RESUME_OPERATION_DISPATCHER in tools:
-
-            @mcp.tool(
-                name=DispatcherMCPTools.RESUME_OPERATION_DISPATCHER.value,
-                description="Resume the paused operation dispatcher runtime loop.",
-            )
-            def resume_operation_dispatcher() -> dict[str, Any]:
-                return self.resume_dispatcher_runtime()
-
-        if DispatcherMCPTools.GET_HISTORY in tools:
-
-            @mcp.tool(
-                name=DispatcherMCPTools.GET_HISTORY.value,
-                description="Get a historical slice of dispatcher events and optionally resolved operations. Can be filtered by time range and limited in size (default limit 1000, max limit 10000).",
-            )
-            def dispatcher_history_resource(
-                from_time: datetime | None = None,
-                to_time: datetime | None = None,
-                resolve_operations: bool = True,
-                limit: int | None = None,
-            ) -> dict[str, Any]:
-                return self._dispatcher_history_payload(
-                    from_time=from_time,
-                    to_time=to_time,
-                    resolve_operations=resolve_operations,
-                    limit=limit,
-                )
+        handlers = {
+            DispatcherMCPTools.GET_DISPATCHER_STATE: self._api.get_operation_dispatcher_state_response,
+            DispatcherMCPTools.PAUSE_OPERATION_DISPATCHER: self._api.pause_operation_dispatcher_response,
+            DispatcherMCPTools.RESUME_OPERATION_DISPATCHER: self._api.resume_operation_dispatcher_response,
+            DispatcherMCPTools.GET_HISTORY: self._api.get_history_response,
+            DispatcherMCPTools.LIST_OPERATIONS: self._api.list_operations_response,
+            DispatcherMCPTools.GET_OPERATION: self._api.get_operation_response,
+            DispatcherMCPTools.GET_CURRENT_OPERATION: self._api.get_current_operation_response,
+            DispatcherMCPTools.GET_OPERATION_EVENTS: self._api.get_operation_events_response,
+            DispatcherMCPTools.ADD_OPERATIONS: self._api.add_operation_response,
+            DispatcherMCPTools.UPDATE_OPERATION: self._api.update_operation_response,
+            DispatcherMCPTools.CANCEL_OPERATION: self._api.cancel_operation_response,
+            DispatcherMCPTools.PAUSE_OPERATION: self._api.pause_operation_response,
+            DispatcherMCPTools.RESUME_OPERATION: self._api.resume_operation_response,
+            DispatcherMCPTools.REQUEST_OPERATION_COMPLETION: self._api.complete_operation_response,
+            DispatcherMCPTools.START_OPERATION_DISPATCHER: self._api.start_operation_dispatcher_response,
+            DispatcherMCPTools.STOP_OPERATION_DISPATCHER: self._api.stop_operation_dispatcher_response,
+        }
+        for tool in tools:
+            handler = handlers[tool]
+            action = handler.__name__.removesuffix("_response")
+            if tool is DispatcherMCPTools.GET_DISPATCHER_STATE:
+                action = "get_dispatcher_state"
+            mcp.tool(
+                name=tool.value, description=ACTION_DESCRIPTIONS[action].description
+            )(_as_mcp_tool(handler))
 
     def register_resources(
         self,
@@ -223,7 +267,11 @@ class OperationDispatcherMCPUtility:
             "OperationDispatcher overview:\n"
             "- The dispatcher manages and schedules operations for one resource_id.\n"
             "- Each operation has payload, priority, optional timing constraints, and lifecycle state.\n"
-            "- A runtime loop selects eligible work and emits start/cancel/pause/resume request events.\n"
+            "- Lifecycle tools request application approval for cancel/pause/resume/completion.\n"
+            "- Completion takes command_payload with outcome SUCCESS or FAILURE; a configured approval callback is required.\n"
+            "- Tool payloads and validation match OpenAPI. "
+            f"History defaults to {min(50, self.operation_dispatcher.event_history_limit)} events "
+            f"(maximum {self.operation_dispatcher.event_history_limit}).\n"
             "- External executors acknowledge request events; outcomes are fed back to complete or fail operations.\n"
             "- The dispatcher records event history and exposes schedule/state for diagnostics and auditability.\n"
             "General working principle:\n"
@@ -239,7 +287,7 @@ class OperationDispatcherMCPUtility:
         )
 
     def _dispatcher_state_payload(self) -> dict[str, Any]:
-        return self._operation_dispatcher.get_state().model_dump(mode="json")
+        return _mcp_payload(self._api.get_operation_dispatcher_state_response())
 
     def _dispatcher_queue_payload(self) -> list[dict[str, Any]]:
         return [
@@ -252,87 +300,29 @@ class OperationDispatcherMCPUtility:
         from_time: datetime | None,
         to_time: datetime | None,
         resolve_operations: bool = True,
-        limit: int = 1000,
+        limit: int | None = None,
     ) -> dict[str, Any]:
-        return self._operation_dispatcher.get_history(
-            from_time=from_time,
-            to_time=to_time,
-            resolve_operations=resolve_operations,
-            limit=limit,
-        ).model_dump(mode="json")
+        return _mcp_payload(
+            self._api.get_history_response(
+                from_time, to_time, resolve_operations, limit
+            )
+        )
 
     def _dispatcher_events_payload(self, limit: int) -> list[dict[str, Any]]:
-        history = self._operation_dispatcher.get_history(
-            from_time=None,
-            to_time=None,
-            resolve_operations=False,
-            limit=limit,
-        )
-        return [event.model_dump(mode="json") for event in history.events]
+        return self._dispatcher_history_payload(None, None, False, limit)["events"]
 
     def _operation_payload(self, operation_id: str) -> dict[str, Any]:
-        try:
-            parsed_operation_id = UUID(operation_id)
-        except ValueError:
-            return {
-                "error": "invalid_operation_id",
-                "message": "operation_id must be a valid UUID",
-            }
-
-        operation = self._operation_dispatcher.get_operation(parsed_operation_id)
-        if operation is None:
-            return {
-                "error": "operation_not_found",
-                "message": "operation not found",
-                "operation_id": operation_id,
-            }
-
-        return operation.model_dump(mode="json")
+        # Keep the existing resource shape; tools return the full operation status.
+        return _mcp_payload(self._api.get_operation_response(operation_id))["operation"]
 
     def _operation_events_payload(self, operation_id: str) -> list[dict[str, Any]]:
-        try:
-            parsed_operation_id = UUID(operation_id)
-        except ValueError:
-            return [
-                {
-                    "error": "invalid_operation_id",
-                    "message": "operation_id must be a valid UUID",
-                    "operation_id": operation_id,
-                }
-            ]
-
-        return [
-            event.model_dump(mode="json")
-            for event in self._operation_dispatcher._event_service.get_events_for_operation(
-                parsed_operation_id
-            )
-        ]
+        return _mcp_payload(self._api.get_operation_events_response(operation_id))
 
     def resume_dispatcher_runtime(self) -> dict[str, Any]:
-        if not self._operation_dispatcher.is_paused:
-            return {
-                "message": "operation dispatcher is not paused",
-                "state": self._dispatcher_state_payload(),
-            }
-
-        self._operation_dispatcher.resume_dispatcher_runtime()
-        return {
-            "message": "operation dispatcher resumed",
-            "state": self._dispatcher_state_payload(),
-        }
+        return _mcp_payload(self._api.resume_operation_dispatcher_response())
 
     def pause_dispatcher_runtime(self) -> dict[str, Any]:
-        if self._operation_dispatcher.is_paused:
-            return {
-                "message": "operation dispatcher is already paused",
-                "state": self._dispatcher_state_payload(),
-            }
-
-        self._operation_dispatcher.pause_dispatcher_runtime()
-        return {
-            "message": "operation dispatcher paused",
-            "state": self._dispatcher_state_payload(),
-        }
+        return _mcp_payload(self._api.pause_operation_dispatcher_response())
 
 
 class OperationDispatcherMCPServer:
@@ -350,9 +340,12 @@ class OperationDispatcherMCPServer:
         resources: list[DispatcherMCPResources] | None = None,
         prompts: list[DispatcherMCPPrompts] | None = None,
         json_response: bool = True,
+        runtime_controller: OperationDispatcherRuntimeController | None = None,
         **fastmcp_kwargs: Any,
     ) -> None:
-        self._utility = OperationDispatcherMCPUtility(operation_dispatcher)
+        self._utility = OperationDispatcherMCPUtility(
+            operation_dispatcher, runtime_controller
+        )
         self._host = host
         self._port = port
         self._json_response = json_response
@@ -387,6 +380,13 @@ class OperationDispatcherMCPServer:
         transport: Literal["stdio", "sse", "streamable-http", "http"] = "sse",
         mount_path: str | None = None,
     ) -> None:
+        if transport == "stdio":
+            if mount_path is not None:
+                raise ValueError("mount_path is only supported for HTTP transports")
+            self._mcp.run(transport="stdio")
+            return
+        if transport not in {"sse", "streamable-http", "http"}:
+            raise ValueError(f"unsupported transport: {transport}")
         resolved_transport = "http" if transport == "streamable-http" else transport
         run_kwargs: dict[str, Any] = {
             "transport": resolved_transport,
@@ -395,17 +395,8 @@ class OperationDispatcherMCPServer:
             "json_response": self._json_response,
         }
         if mount_path is not None:
-            run_kwargs["mount_path"] = mount_path
-
-        try:
-            self._mcp.run(**run_kwargs)
-        except TypeError:
-            legacy_transport = (
-                "streamable-http"
-                if resolved_transport == "http"
-                else resolved_transport
-            )
-            self._mcp.run(transport=legacy_transport, mount_path=mount_path)
+            run_kwargs["path"] = mount_path
+        self._mcp.run(**run_kwargs)
 
     def _create_lifespan(self):
         @asynccontextmanager
@@ -428,10 +419,11 @@ class OperationDispatcherMCPServer:
 
 def create_operation_dispatcher_mcp_utility(
     operation_dispatcher: OperationDispatcher,
+    runtime_controller: OperationDispatcherRuntimeController | None = None,
 ) -> OperationDispatcherMCPUtility:
     """Build MCP utility helpers around an existing `OperationDispatcher` instance."""
 
-    return OperationDispatcherMCPUtility(operation_dispatcher)
+    return OperationDispatcherMCPUtility(operation_dispatcher, runtime_controller)
 
 
 def create_operation_dispatcher_mcp_server(

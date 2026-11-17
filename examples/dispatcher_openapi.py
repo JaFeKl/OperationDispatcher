@@ -81,6 +81,14 @@ class DemoDispatcherService:
         if event.event_type is EventType.OPERATION_CANCEL_REQUESTED:
             return self._simulated_runner.cancel(operation_id=operation.id)
 
+        if event.event_type is EventType.OPERATION_COMPLETE_REQUESTED:
+            # Applies to either requested outcome (SUCCESS or FAILURE). Stop the
+            # simulated work before approval; the dispatcher records the result.
+            self._logger.info(
+                "Requested completion outcome: %s", event.meta_data["outcome"]
+            )
+            return self._simulated_runner.cancel(operation_id=operation.id)
+
         if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
             return self._simulated_runner.pause(operation_id=operation.id)
 

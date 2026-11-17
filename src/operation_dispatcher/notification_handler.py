@@ -19,7 +19,7 @@ class NotificationHandler:
     ) -> None:
         self._on_notification_callback = on_notification_callback
         self._runtime_loop_getter = runtime_loop_getter
-        self._logger = logger
+        self._logger = logger or logging.getLogger(__name__)
 
     def notify(self, event: DispatchEvent) -> None:
         if self._on_notification_callback is None:
@@ -30,12 +30,12 @@ class NotificationHandler:
             if inspect.isawaitable(callback_result):
                 self._schedule_awaitable(_as_awaitable(callback_result))
         except Exception:
-            pass
+            self._logger.exception("notification callback failed")
 
     def _schedule_awaitable(self, awaitable: Awaitable[object]) -> None:
         try:
             running_loop = asyncio.get_running_loop()
-            running_loop.create_task(awaitable)
+            self._create_observed_task(running_loop, awaitable)
             return
         except RuntimeError:
             pass
@@ -50,9 +50,22 @@ class NotificationHandler:
             return
 
         runtime_loop.call_soon_threadsafe(
-            runtime_loop.create_task,
+            self._create_observed_task,
+            runtime_loop,
             awaitable,
         )
+
+    def _create_observed_task(self, loop, awaitable) -> None:
+        task = loop.create_task(awaitable)
+
+        def done(task):
+            if not task.cancelled() and (error := task.exception()) is not None:
+                self._logger.error(
+                    "async notification callback failed",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        task.add_done_callback(done)
 
     def _run_awaitable_in_background(self, awaitable: Awaitable[object]) -> None:
         def run_awaitable() -> None:

@@ -1,24 +1,24 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from operation_dispatcher.dispatch_queue import DispatchQueue, SortRule
 from operation_dispatcher.models import (
+    DEFAULT_EVENT_HISTORY_LIMIT,
     DispatchEvent,
-    EventType,
     ExecutionOutcome,
-    ExecutionState,
     History,
     OperationDispatcherState,
     Operation,
     TerminationReason,
 )
 from operation_dispatcher.notification_handler import NotificationHandler
-from operation_dispatcher.request_handler import RequestHandler
+from operation_dispatcher.request_handler import RequestCallback, RequestHandler
 from operation_dispatcher.retry_policy import RetryPolicy
 from operation_dispatcher.services import (
     DispatcherEventService,
@@ -28,7 +28,6 @@ from operation_dispatcher.services import (
     DispatcherStateStore,
     OperationLifecycleService,
 )
-from operation_dispatcher.utils import get_changes
 
 
 class OperationDispatcher:
@@ -41,12 +40,6 @@ class OperationDispatcher:
             "planned_duration",
             "due_date",
             "dependencies",
-            "state",
-            "outcome",
-            "termination_reason",
-            "retry_count",
-            "start_time",
-            "finish_time",
         }
     )
 
@@ -61,9 +54,7 @@ class OperationDispatcher:
         default_planned_duration: int | None = None,
         updatable_fields: list[str] | None = None,
         dispatch_queue_sort_rules: list[SortRule] | None = None,
-        on_request_callback: (
-            Callable[[DispatchEvent], bool | dict[str, Any] | None] | None
-        ) = None,
+        on_request_callback: RequestCallback | None = None,
         on_notification_callback: Callable[[DispatchEvent], object] | None = None,
         on_history_callback: (
             Callable[
@@ -79,7 +70,22 @@ class OperationDispatcher:
             | None
         ) = None,
         logger: logging.Logger | None = None,
+        *,
+        event_history_limit: int = DEFAULT_EVENT_HISTORY_LIMIT,
+        request_max_retries: int | None = None,
+        request_retry_cooldown_seconds: float | None = None,
     ) -> None:
+        # Original start_request_* names remain compatibility aliases.
+        if request_max_retries is not None:
+            start_request_max_retries = request_max_retries
+        if request_retry_cooldown_seconds is not None:
+            start_request_retry_cooldown_seconds = request_retry_cooldown_seconds
+        if (
+            isinstance(event_history_limit, bool)
+            or not isinstance(event_history_limit, int)
+            or event_history_limit <= 0
+        ):
+            raise ValueError("event_history_limit must be a positive integer")
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be greater than 0")
         if start_request_max_retries <= 0:
@@ -107,6 +113,7 @@ class OperationDispatcher:
             updatable_fields=updatable_fields_set,
             on_history_callback=on_history_callback,
             is_paused=start_paused,
+            event_history_limit=event_history_limit,
         )
 
         self._mutation_service = DispatcherMutationService(self._state_store)
@@ -124,7 +131,9 @@ class OperationDispatcher:
             self._mutation_service,
             self._event_service,
         )
-        self._history_service = DispatcherHistoryService(self._state_store)
+        self._history_service = DispatcherHistoryService(
+            self._state_store, self._mutation_service
+        )
 
         request_retry_policy = RetryPolicy(
             max_retries=start_request_max_retries,
@@ -142,15 +151,35 @@ class OperationDispatcher:
             request_event_timeout_seconds=request_event_timeout_seconds,
             emit_event=self._event_service.emit_event,
             pause=self._runtime_service.pause_dispatcher_runtime,
+            execute_mutation=self._mutation_service.execute,
         )
 
     @property
+    def event_history_limit(self) -> int:
+        """Maximum number of dispatcher events retained in memory."""
+        return self._state_store.event_history_limit
+
+    @property
+    def resource_id(self) -> str:
+        return self._state_store.dispatch_queue.resource_id
+
+    @property
+    def updatable_fields(self) -> frozenset[str]:
+        """Payload and scheduling fields this dispatcher accepts in updates."""
+        return self._state_store.updatable_fields
+
+    @property
     def dispatch_queue(self) -> DispatchQueue:
-        return self._operation_service.dispatch_queue
+        """A detached queue snapshot; use facade commands to modify the dispatcher."""
+        return self._mutation_service.execute(
+            lambda: deepcopy(self._operation_service.dispatch_queue)
+        )
 
     @property
     def current_operation(self) -> Operation | None:
-        return self._operation_service.current_operation
+        return self._mutation_service.execute(
+            lambda: deepcopy(self._operation_service.current_operation)
+        )
 
     @property
     def is_paused(self) -> bool:
@@ -161,7 +190,9 @@ class OperationDispatcher:
         return self._runtime_service.is_running
 
     def get_operation(self, operation_id: UUID) -> Operation | None:
-        return self._operation_service.get_operation(operation_id)
+        return self._mutation_service.execute(
+            lambda: deepcopy(self._operation_service.get_operation(operation_id))
+        )
 
     # Operation lifecycle methods
 
@@ -172,7 +203,7 @@ class OperationDispatcher:
         meta_data: dict[str, Any] | None = None,
     ) -> None:
         self._operation_service.add(
-            operation=operation,
+            operation=Operation.model_validate(deepcopy(operation.model_dump())),
             apply_default_planned_duration=apply_default_planned_duration,
             meta_data=meta_data,
         )
@@ -225,6 +256,24 @@ class OperationDispatcher:
             meta_data=meta_data,
         )
 
+    def request_operation_completion(
+        self,
+        operation_id: UUID,
+        outcome: ExecutionOutcome,
+        termination_reason: TerminationReason | None = None,
+        meta_data: dict[str, Any] | None = None,
+    ) -> Operation | None:
+        """Request approval to complete; return None on denial.
+
+        Raises ValueError for invalid commands, LookupError for unknown IDs,
+        and RuntimeError when the operation is no longer current/eligible.
+        In async applications, call through asyncio.to_thread to avoid blocking
+        the event loop while waiting for application approval.
+        """
+        return self._operation_service.request_operation_completion(
+            operation_id, outcome, termination_reason, meta_data
+        )
+
     def complete_operation(
         self,
         operation_id: UUID,
@@ -248,12 +297,27 @@ class OperationDispatcher:
         )
 
     def get_schedule(self) -> list[Operation]:
-        return self._operation_service.get_schedule()
+        return self._mutation_service.execute(
+            lambda: deepcopy(self._operation_service.get_schedule())
+        )
+
+    def get_operation_events(self, operation_id: UUID) -> list[DispatchEvent]:
+        return self._mutation_service.execute(
+            lambda: deepcopy(self._event_service.get_events_for_operation(operation_id))
+        )
+
+    def prune_completed_operations(self, keep: int = 0) -> int:
+        """Discard oldest archived operations; retained event records are unaffected."""
+        return self._mutation_service.execute(
+            lambda: self._state_store.dispatch_queue.prune_history(keep)
+        )
 
     # Dispatcher runtime methods
 
     def get_state(self) -> OperationDispatcherState:
-        return self._runtime_service.get_state()
+        return self._mutation_service.execute(
+            lambda: self._runtime_service.get_state().model_copy(deep=True)
+        )
 
     def pause_dispatcher_runtime(self) -> None:
         self._runtime_service.pause_dispatcher_runtime()

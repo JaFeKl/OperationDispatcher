@@ -83,6 +83,8 @@ class DispatchQueue:
 
     def add(self, operation: Operation) -> None:
         self._validate_operation(operation)
+        if self.get(operation.id) is not None:
+            raise ValueError("operation id already exists in this dispatcher")
         self._queue.append(operation)
         self._sort_operations()
 
@@ -139,6 +141,14 @@ class DispatchQueue:
 
     def clear_history(self) -> None:
         self._completed.clear()
+
+    def prune_history(self, keep: int = 0) -> int:
+        """Remove oldest archived operations, retaining the newest `keep`."""
+        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
+            raise ValueError("keep must be a non-negative integer")
+        removed = max(0, len(self._completed) - keep)
+        del self._completed[:removed]
+        return removed
 
     def remove(self, operation_id: UUID) -> Operation | None:
         for index, operation in enumerate(self._queue):

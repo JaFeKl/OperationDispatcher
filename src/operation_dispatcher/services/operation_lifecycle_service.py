@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from operation_dispatcher.models import (
+    CompleteOperationCommand,
     EventType,
     ExecutionOutcome,
     ExecutionState,
@@ -63,6 +66,13 @@ class OperationLifecycleService:
         ):
             operation.planned_duration = self._state_store.default_planned_duration
 
+        if (
+            operation.state is not ExecutionState.QUEUED
+            or operation.outcome is not ExecutionOutcome.NONE
+        ):
+            raise ValueError("new operations must be QUEUED with outcome NONE")
+        if operation.start_time is not None or operation.finish_time is not None:
+            raise ValueError("new operations cannot contain execution timestamps")
         self._state_store.dispatch_queue.add(operation)
         self._event_service.emit_event(
             EventType.OPERATION_ADDED,
@@ -85,8 +95,98 @@ class OperationLifecycleService:
             lambda: self._complete_operation_internal(
                 operation_id,
                 meta_data=meta_data,
-            )
+            ).model_copy(deep=True)
         )
+
+    def request_operation_completion(
+        self,
+        operation_id: UUID,
+        outcome: ExecutionOutcome,
+        termination_reason: TerminationReason | None = None,
+        meta_data: dict[str, Any] | None = None,
+    ) -> Operation | None:
+        command = CompleteOperationCommand(
+            outcome=outcome,
+            termination_reason=termination_reason,
+            meta_data={} if meta_data is None else deepcopy(meta_data),
+        )
+        assert command.termination_reason is not None  # Resolved by command validation.
+        request_metadata = {
+            **command.meta_data,
+            "outcome": command.outcome.value,
+            "termination_reason": command.termination_reason.value,
+        }
+        request_metadata.pop("request_decision", None)
+        return self._request_transition(
+            operation_id,
+            EventType.OPERATION_COMPLETE_REQUESTED,
+            self._require_completable_operation,
+            lambda operation: (
+                self._complete_operation_internal(operation.id, request_metadata)
+                if command.outcome is ExecutionOutcome.SUCCESS
+                else self._fail_operation_internal(
+                    operation.id, command.termination_reason, request_metadata
+                )
+            ),
+            request_metadata,
+            use_retry=False,
+            require_callback=True,
+        )
+
+    def _request_transition(
+        self,
+        operation_id: UUID,
+        event_type: EventType,
+        validate: Callable[[UUID], Operation | None],
+        commit: Callable[[Operation], Operation],
+        meta_data: dict[str, Any] | None,
+        *,
+        use_retry: bool = True,
+        require_callback: bool = False,
+    ) -> Operation | None:
+        handler = self._state_store.request_handler
+        if handler is None:
+            return None
+        metadata = deepcopy(meta_data)
+
+        def prepare():
+            operation = validate(operation_id)
+            if operation is None or (
+                use_retry and not handler.can_request(operation, event_type)
+            ):
+                return None
+            return operation, operation.model_copy(deep=True)
+
+        selected = self._mutation_service.execute(prepare)
+        if selected is None:
+            return None
+        operation, snapshot = selected
+        decision = handler.evaluate_operation_request_sync(
+            snapshot, event_type, metadata, require_callback=require_callback
+        )
+
+        def finalize():
+            if not handler.complete_request(
+                snapshot, event_type, decision, metadata, use_retry=use_retry
+            ):
+                return None
+            current = validate(operation_id)
+            if (
+                current is not operation
+                or current.model_dump() != snapshot.model_dump()
+            ):
+                raise RuntimeError("operation changed during approval")
+            return commit(operation).model_copy(deep=True)
+
+        return self._mutation_service.execute(finalize)
+
+    def _require_completable_operation(self, operation_id: UUID) -> Operation:
+        if self.get_operation(operation_id) is None:
+            raise LookupError("operation not found")
+        operation = self._require_current_operation(operation_id)
+        if operation.state not in (ExecutionState.RUNNING, ExecutionState.PAUSED):
+            raise RuntimeError("operation must be running or paused")
+        return operation
 
     def _complete_operation_internal(
         self,
@@ -103,6 +203,7 @@ class OperationLifecycleService:
             set_finish_time=True,
         )
         self._state_store.dispatch_queue.complete(operation)
+        self._state_store.request_handler.clear_request_retry_state(operation.id)
         self._event_service.emit_event(
             EventType.OPERATION_COMPLETED,
             operation=operation,
@@ -122,7 +223,7 @@ class OperationLifecycleService:
                 operation_id,
                 termination_reason=termination_reason,
                 meta_data=meta_data,
-            )
+            ).model_copy(deep=True)
         )
 
     def _fail_operation_internal(
@@ -141,6 +242,7 @@ class OperationLifecycleService:
             set_finish_time=True,
         )
         self._state_store.dispatch_queue.complete(operation)
+        self._state_store.request_handler.clear_request_retry_state(operation.id)
         self._event_service.emit_event(
             EventType.OPERATION_FAILED,
             operation=operation,
@@ -155,44 +257,29 @@ class OperationLifecycleService:
         enforce_running_state: bool = True,
         meta_data: dict[str, Any] | None = None,
     ) -> bool:
-        return self._mutation_service.execute(
-            lambda: self._pause_operation_internal(
+        meta_data = deepcopy(meta_data)
+
+        def validate(operation_id):
+            operation = self._require_current_operation(operation_id)
+            if enforce_running_state and operation.state is not ExecutionState.RUNNING:
+                raise RuntimeError("current operation is not running")
+            return operation
+
+        return (
+            self._request_transition(
                 operation_id,
-                enforce_running_state,
-                meta_data=meta_data,
+                EventType.OPERATION_PAUSE_REQUESTED,
+                validate,
+                lambda operation: self._set_execution_state(
+                    operation,
+                    ExecutionState.PAUSED,
+                    EventType.OPERATION_PAUSED,
+                    meta_data,
+                ),
+                meta_data,
             )
+            is not None
         )
-
-    def _pause_operation_internal(
-        self,
-        operation_id: UUID,
-        enforce_running_state: bool,
-        meta_data: dict[str, Any] | None,
-    ) -> bool:
-        operation = self._require_current_operation(operation_id)
-        if enforce_running_state and operation.state is not ExecutionState.RUNNING:
-            raise RuntimeError("current operation is not running")
-
-        request_handler = self._state_store.request_handler
-        if request_handler is None:
-            return False
-
-        if not request_handler.request_operation_with_retry_sync(
-            operation,
-            EventType.OPERATION_PAUSE_REQUESTED,
-            meta_data=meta_data,
-        ):
-            return False
-
-        old_operation = operation.model_copy(deep=True)
-        self._transition_operation_state(operation, state=ExecutionState.PAUSED)
-        self._event_service.emit_event(
-            EventType.OPERATION_PAUSED,
-            operation=operation,
-            meta_data=meta_data,
-            old_operation=old_operation,
-        )
-        return True
 
     def resume_operation(
         self,
@@ -200,45 +287,40 @@ class OperationLifecycleService:
         enforce_paused_state: bool = True,
         meta_data: dict[str, Any] | None = None,
     ) -> bool:
-        return self._mutation_service.execute(
-            lambda: self._resume_operation_internal(
+        meta_data = deepcopy(meta_data)
+
+        def validate(operation_id):
+            operation = self._require_current_operation(operation_id)
+            if enforce_paused_state and operation.state is not ExecutionState.PAUSED:
+                raise RuntimeError("current operation is not paused")
+            return operation
+
+        return (
+            self._request_transition(
                 operation_id,
-                enforce_paused_state,
-                meta_data=meta_data,
+                EventType.OPERATION_RESUME_REQUESTED,
+                validate,
+                lambda operation: self._set_execution_state(
+                    operation,
+                    ExecutionState.RUNNING,
+                    EventType.OPERATION_RESUMED,
+                    meta_data,
+                ),
+                meta_data,
             )
+            is not None
         )
 
-    def _resume_operation_internal(
-        self,
-        operation_id: UUID,
-        enforce_paused_state: bool,
-        meta_data: dict[str, Any] | None,
-    ) -> bool:
-        operation = self._require_current_operation(operation_id)
-        if enforce_paused_state and operation.state is not ExecutionState.PAUSED:
-            raise RuntimeError("current operation is not paused")
-
-        request_handler = self._state_store.request_handler
-        if request_handler is None:
-            return False
-
-        accepted = request_handler.request_operation_with_retry_sync(
-            operation,
-            EventType.OPERATION_RESUME_REQUESTED,
-            meta_data=meta_data,
-        )
-        if not accepted:
-            return False
-
+    def _set_execution_state(self, operation, state, event_type, meta_data):
         old_operation = operation.model_copy(deep=True)
-        self._transition_operation_state(operation, state=ExecutionState.RUNNING)
+        self._transition_operation_state(operation, state=state)
         self._event_service.emit_event(
-            EventType.OPERATION_RESUMED,
+            event_type,
             operation=operation,
             meta_data=meta_data,
             old_operation=old_operation,
         )
-        return True
+        return operation
 
     def cancel(
         self,
@@ -246,56 +328,42 @@ class OperationLifecycleService:
         termination_reason: TerminationReason = TerminationReason.INTERNAL_ERROR,
         meta_data: dict[str, Any] | None = None,
     ) -> Operation | None:
-        return self._mutation_service.execute(
-            lambda: self._cancel_internal(
-                operation_id,
+        meta_data = deepcopy(meta_data)
+
+        def validate(operation_id):
+            operation = self.get_operation(operation_id)
+            if operation is None or operation.state is ExecutionState.COMPLETED:
+                return None
+            return operation
+
+        def commit(operation):
+            old_operation = operation.model_copy(deep=True)
+            cancelled = self._state_store.dispatch_queue.cancel(operation.id)
+            if cancelled is None:
+                raise RuntimeError("operation changed during approval")
+            self._transition_operation_state(
+                operation,
+                state=ExecutionState.COMPLETED,
+                outcome=ExecutionOutcome.CANCELLED,
                 termination_reason=termination_reason,
-                meta_data=meta_data,
+                set_finish_time=True,
             )
-        )
+            self._state_store.request_handler.clear_request_retry_state(operation.id)
+            self._event_service.emit_event(
+                EventType.OPERATION_CANCELLED,
+                operation=operation,
+                meta_data=meta_data,
+                old_operation=old_operation,
+            )
+            return operation
 
-    def _cancel_internal(
-        self,
-        operation_id: UUID,
-        termination_reason: TerminationReason,
-        meta_data: dict[str, Any] | None,
-    ) -> Operation | None:
-        operation = self.get_operation(operation_id)
-        if operation is None:
-            return None
-
-        request_handler = self._state_store.request_handler
-        if request_handler is None:
-            return None
-
-        if not request_handler.request_operation_with_retry_sync(
-            operation,
+        return self._request_transition(
+            operation_id,
             EventType.OPERATION_CANCEL_REQUESTED,
-            meta_data=meta_data,
-        ):
-            return None
-
-        cancelled_operation = self._state_store.dispatch_queue.cancel(operation_id)
-        if cancelled_operation is None:
-            return None
-
-        old_operation = cancelled_operation.model_copy(deep=True)
-        self._transition_operation_state(
-            cancelled_operation,
-            state=ExecutionState.COMPLETED,
-            outcome=ExecutionOutcome.CANCELLED,
-            termination_reason=termination_reason,
-            set_finish_time=True,
+            validate,
+            commit,
+            meta_data,
         )
-
-        request_handler.clear_request_retry_state(cancelled_operation.id)
-        self._event_service.emit_event(
-            EventType.OPERATION_CANCELLED,
-            operation=cancelled_operation,
-            meta_data=meta_data,
-            old_operation=old_operation,
-        )
-        return cancelled_operation
 
     def update(
         self,
@@ -321,8 +389,11 @@ class OperationLifecycleService:
         if operation is None:
             return None
 
+        if operation.state is ExecutionState.COMPLETED:
+            raise RuntimeError("cannot update a completed operation")
+
         if not updates:
-            return operation
+            return operation.model_copy(deep=True)
 
         current = self.current_operation
         if (
@@ -342,7 +413,7 @@ class OperationLifecycleService:
 
         old_operation = operation.model_copy(deep=True)
         for field in updates:
-            setattr(operation, field, getattr(validated_operation, field))
+            setattr(operation, field, deepcopy(getattr(validated_operation, field)))
 
         self._state_store.dispatch_queue.resort()
 
@@ -354,7 +425,7 @@ class OperationLifecycleService:
                 old_operation=old_operation,
             )
 
-        return operation
+        return operation.model_copy(deep=True)
 
     def _require_current_operation(self, operation_id: UUID) -> Operation:
         current = self.current_operation

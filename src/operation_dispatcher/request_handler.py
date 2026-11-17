@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 import inspect
 import queue
@@ -24,21 +25,41 @@ class RequestDecision:
     reasoning: str | None = None
     data: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        if type(self.accepted) is not bool:
+            raise TypeError("accepted must be a boolean")
+        if self.reasoning is not None and not isinstance(self.reasoning, str):
+            raise TypeError("reasoning must be a string or None")
+        if self.data is not None and not isinstance(self.data, dict):
+            raise TypeError("data must be an object or None")
+
+
+RequestCallback = Callable[
+    [DispatchEvent],
+    bool
+    | RequestDecision
+    | dict[str, Any]
+    | None
+    | Awaitable[bool | RequestDecision | dict[str, Any] | None],
+]
+
 
 class RequestHandler:
     def __init__(
         self,
-        on_request_callback: Callable[[DispatchEvent], object] | None,
+        on_request_callback: RequestCallback | None,
         request_retry_policy: RetryPolicy,
         request_event_timeout_seconds: float,
         emit_event: Callable[..., object],
         pause: Callable[[], None],
+        execute_mutation: Callable[[Callable[[], Any]], Any],
     ) -> None:
         self._on_request_callback = on_request_callback
         self._request_retry_policy = request_retry_policy
         self._request_event_timeout_seconds = request_event_timeout_seconds
         self._emit_event = emit_event
         self._pause = pause
+        self._execute_mutation = execute_mutation
 
     async def request_operation_start(self, operation: Operation) -> bool:
         return await self.request_operation_with_retry(
@@ -60,7 +81,12 @@ class RequestHandler:
         return False
 
     def clear_request_retry_state(self, operation_id: UUID) -> None:
-        request_event_types = (EventType.OPERATION_START_REQUESTED,)
+        request_event_types = (
+            EventType.OPERATION_START_REQUESTED,
+            EventType.OPERATION_CANCEL_REQUESTED,
+            EventType.OPERATION_PAUSE_REQUESTED,
+            EventType.OPERATION_RESUME_REQUESTED,
+        )
         for request_event_type in request_event_types:
             retry_key = self._request_retry_key(operation_id, request_event_type)
             self._request_retry_policy.clear(retry_key)
@@ -87,49 +113,26 @@ class RequestHandler:
             cooldown_wait_seconds = max(cooldown_wait_seconds, wait_seconds)
         return cooldown_wait_seconds
 
+    def can_request(self, operation: Operation, event_type: EventType) -> bool:
+        return not self._request_retry_policy.is_cooldown_active(
+            self._request_retry_key(operation.id, event_type),
+            datetime.now(timezone.utc),
+        )
+
     def request_operation_with_retry_sync(
         self,
         operation: Operation,
         event_type: EventType,
         meta_data: dict[str, Any] | None = None,
     ) -> bool:
-        now = datetime.now(timezone.utc)
-        retry_key = self._request_retry_key(operation.id, event_type)
-        if self._request_retry_policy.is_cooldown_active(retry_key, now):
+        if not self._execute_mutation(lambda: self.can_request(operation, event_type)):
             return False
-
-        decision = self._request_operation_event_sync(
-            operation,
-            event_type,
-            meta_data=meta_data,
+        decision = self.evaluate_operation_request_sync(
+            operation, event_type, meta_data
         )
-        if decision.accepted:
-            self._request_retry_policy.clear(retry_key)
-            return True
-
-        metadata, max_retries_reached = self._request_retry_policy.on_denied(
-            retry_key,
-            now,
+        return self._execute_mutation(
+            lambda: self.complete_request(operation, event_type, decision, meta_data)
         )
-
-        denied_event_type = self._denied_event_type(event_type)
-        if denied_event_type is not None:
-            denied_metadata = dict(metadata)
-            if decision.reasoning is not None:
-                denied_metadata["reasoning"] = decision.reasoning
-            if decision.data:
-                denied_metadata["decision_data"] = decision.data
-            if meta_data:
-                denied_metadata["request_meta_data"] = dict(meta_data)
-            self._emit_event(
-                denied_event_type,
-                operation,
-                denied_metadata,
-            )
-
-        if max_retries_reached:
-            self._pause()
-        return False
 
     async def request_operation_with_retry(
         self,
@@ -137,41 +140,43 @@ class RequestHandler:
         event_type: EventType,
         meta_data: dict[str, Any] | None = None,
     ) -> bool:
-        now = datetime.now(timezone.utc)
-        retry_key = self._request_retry_key(operation.id, event_type)
-        if self._request_retry_policy.is_cooldown_active(retry_key, now):
+        if not self._execute_mutation(lambda: self.can_request(operation, event_type)):
             return False
-
-        decision = await self._request_operation_event(
-            operation,
-            event_type,
-            meta_data=meta_data,
+        decision = await self._request_operation_event(operation, event_type, meta_data)
+        return self._execute_mutation(
+            lambda: self.complete_request(operation, event_type, decision, meta_data)
         )
+
+    def complete_request(
+        self,
+        operation: Operation,
+        event_type: EventType,
+        decision: RequestDecision,
+        meta_data: dict[str, Any] | None = None,
+        *,
+        use_retry: bool = True,
+    ) -> bool:
+        """Record a decision and retry effects while the caller owns mutation access."""
+        self.record_request_decision(operation, event_type, decision, meta_data)
+        retry_key = self._request_retry_key(operation.id, event_type)
         if decision.accepted:
             self._request_retry_policy.clear(retry_key)
             return True
-
-        metadata, max_retries_reached = self._request_retry_policy.on_denied(
-            retry_key,
-            now,
-        )
-
-        denied_event_type = self._denied_event_type(event_type)
-        if denied_event_type is not None:
-            denied_metadata = dict(metadata)
-            if decision.reasoning is not None:
-                denied_metadata["reasoning"] = decision.reasoning
-            if decision.data:
-                denied_metadata["decision_data"] = decision.data
-            if meta_data:
-                denied_metadata["request_meta_data"] = dict(meta_data)
-            self._emit_event(
-                denied_event_type,
-                operation,
-                denied_metadata,
+        metadata, exhausted = ({}, False)
+        if use_retry:
+            metadata, exhausted = self._request_retry_policy.on_denied(
+                retry_key, datetime.now(timezone.utc)
             )
-
-        if max_retries_reached:
+        if decision.reasoning is not None:
+            metadata["reasoning"] = decision.reasoning
+        if decision.data:
+            metadata["decision_data"] = deepcopy(decision.data)
+        if meta_data:
+            metadata["request_meta_data"] = deepcopy(meta_data)
+        denied = self._denied_event_type(event_type)
+        if denied is not None:
+            self._emit_event(denied, operation, metadata)
+        if exhausted:
             self._pause()
         return False
 
@@ -191,6 +196,7 @@ class RequestHandler:
             EventType.OPERATION_CANCEL_REQUESTED: EventType.OPERATION_CANCEL_DENIED,
             EventType.OPERATION_PAUSE_REQUESTED: EventType.OPERATION_PAUSE_DENIED,
             EventType.OPERATION_RESUME_REQUESTED: EventType.OPERATION_RESUME_DENIED,
+            EventType.OPERATION_COMPLETE_REQUESTED: EventType.OPERATION_COMPLETE_DENIED,
         }
         return denied_event_type_by_requested_event_type.get(requested_event_type)
 
@@ -200,7 +206,7 @@ class RequestHandler:
         event_type: EventType,
         meta_data: dict[str, Any] | None = None,
     ) -> RequestDecision:
-        resolved_meta_data = {} if meta_data is None else dict(meta_data)
+        resolved_meta_data = {} if meta_data is None else deepcopy(meta_data)
         callback_event = DispatchEvent(
             resource_id=operation.resource_id,
             operation_id=operation.id,
@@ -222,25 +228,18 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
-        request_event_meta_data = {
-            **resolved_meta_data,
-            **self._decision_event_meta_data(decision),
-        }
-        self._emit_event(
-            event_type,
-            operation,
-            request_event_meta_data,
-            notify=False,
-        )
         return decision
 
-    def _request_operation_event_sync(
+    def evaluate_operation_request_sync(
         self,
         operation: Operation,
         event_type: EventType,
         meta_data: dict[str, Any] | None = None,
+        *,
+        require_callback: bool = False,
     ) -> RequestDecision:
-        resolved_meta_data = {} if meta_data is None else dict(meta_data)
+        """Obtain a decision without mutating dispatcher state or retry counters."""
+        resolved_meta_data = {} if meta_data is None else deepcopy(meta_data)
         callback_event = DispatchEvent(
             resource_id=operation.resource_id,
             operation_id=operation.id,
@@ -248,7 +247,10 @@ class RequestHandler:
             meta_data=resolved_meta_data,
         )
 
-        decision = RequestDecision(accepted=True)
+        decision = RequestDecision(
+            accepted=not require_callback,
+            reasoning="request_callback_not_configured" if require_callback else None,
+        )
         if self._on_request_callback is not None:
             try:
                 callback_result = self._invoke_request_callback_sync(callback_event)
@@ -260,8 +262,17 @@ class RequestHandler:
                     data={"error": str(error)},
                 )
 
+        return decision
+
+    def record_request_decision(
+        self,
+        operation: Operation,
+        event_type: EventType,
+        decision: RequestDecision,
+        meta_data: dict[str, Any] | None = None,
+    ) -> None:
         request_event_meta_data = {
-            **resolved_meta_data,
+            **(meta_data or {}),
             **self._decision_event_meta_data(decision),
         }
         self._emit_event(
@@ -270,51 +281,22 @@ class RequestHandler:
             request_event_meta_data,
             notify=False,
         )
-        return decision
 
     @staticmethod
     def _resolve_request_decision(callback_result: object) -> RequestDecision:
-        if isinstance(callback_result, RequestDecision):
-            return callback_result
-        if isinstance(callback_result, dict):
-            accepted = bool(callback_result.get("accepted", False))
-            reasoning = callback_result.get("reasoning")
-            if reasoning is not None and not isinstance(reasoning, str):
-                reasoning = str(reasoning)
-            data = callback_result.get("data")
-            if data is None:
-                data_dict: dict[str, Any] = {}
-            elif isinstance(data, dict):
-                data_dict = data
-            else:
-                data_dict = {"value": data}
-            return RequestDecision(
-                accepted=accepted,
-                reasoning=reasoning,
-                data=data_dict,
-            )
-        if hasattr(callback_result, "accepted"):
-            accepted = bool(getattr(callback_result, "accepted"))
-            reasoning_raw = getattr(callback_result, "reasoning", None)
-            data_raw = getattr(callback_result, "data", {})
-            return RequestDecision(
-                accepted=accepted,
-                reasoning=(str(reasoning_raw) if reasoning_raw is not None else None),
-                data=data_raw if isinstance(data_raw, dict) else {"value": data_raw},
-            )
-        if hasattr(callback_result, "is_allowed"):
-            accepted = bool(getattr(callback_result, "is_allowed"))
-            reasoning_raw = getattr(callback_result, "reason", None)
-            data_raw = getattr(callback_result, "metadata", {})
-            return RequestDecision(
-                accepted=accepted,
-                reasoning=(str(reasoning_raw) if reasoning_raw is not None else None),
-                data=data_raw if isinstance(data_raw, dict) else {"value": data_raw},
-            )
-        if callback_result is True:
-            return RequestDecision(accepted=True)
-        if callback_result is False:
-            return RequestDecision(accepted=False)
+        try:
+            if isinstance(callback_result, RequestDecision):
+                return deepcopy(callback_result)
+            if type(callback_result) is bool:
+                return RequestDecision(accepted=callback_result)
+            if isinstance(callback_result, dict):
+                return RequestDecision(
+                    accepted=callback_result.get("accepted"),
+                    reasoning=callback_result.get("reasoning"),
+                    data=deepcopy(callback_result.get("data")),
+                )
+        except (TypeError, ValueError):
+            pass
         return RequestDecision(
             accepted=False,
             reasoning="invalid_callback_result",
@@ -335,16 +317,16 @@ class RequestHandler:
         if self._on_request_callback is None:
             raise RuntimeError("on_request_callback is not configured")
 
-        callback_result = await asyncio.wait_for(
-            asyncio.to_thread(self._on_request_callback, event),
-            timeout=self._request_event_timeout_seconds,
+        async def invoke() -> object:
+            if inspect.iscoroutinefunction(self._on_request_callback):
+                return await self._on_request_callback(event)
+            # The bounded worker also prevents a timed-out synchronous callback
+            # from holding asyncio's executor shutdown open indefinitely.
+            return await asyncio.to_thread(self._invoke_request_callback_sync, event)
+
+        return await asyncio.wait_for(
+            invoke(), timeout=self._request_event_timeout_seconds
         )
-        if inspect.isawaitable(callback_result):
-            callback_result = await asyncio.wait_for(
-                _as_awaitable(callback_result),
-                timeout=self._request_event_timeout_seconds,
-            )
-        return callback_result
 
     def _invoke_request_callback_sync(self, event: DispatchEvent) -> object:
         if self._on_request_callback is None:

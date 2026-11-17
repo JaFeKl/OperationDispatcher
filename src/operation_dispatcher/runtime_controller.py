@@ -109,11 +109,19 @@ class OperationDispatcherRuntimeController:
             self._operation_dispatcher.request_stop()
             runtime_thread = self._runtime_thread
 
-        if runtime_thread is not None and runtime_thread.is_alive():
+        if (
+            runtime_thread is not None
+            and runtime_thread.is_alive()
+            and runtime_thread is not threading.current_thread()
+        ):
             runtime_thread.join(timeout=self._stop_join_timeout_seconds)
 
         return {
-            "message": "operation dispatcher stopped",
+            "message": (
+                "operation dispatcher stop requested"
+                if self._operation_dispatcher.is_running
+                else "operation dispatcher stopped"
+            ),
             "state": self.get_state_payload(),
         }, 202
 

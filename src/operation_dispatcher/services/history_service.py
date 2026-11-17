@@ -4,11 +4,17 @@ from typing import Optional
 from operation_dispatcher.models import DispatchEvent, History
 from datetime import datetime
 from .state_store import DispatcherStateStore
+from .mutation_service import DispatcherMutationService
 
 
 class DispatcherHistoryService:
-    def __init__(self, state_store: DispatcherStateStore) -> None:
+    def __init__(
+        self,
+        state_store: DispatcherStateStore,
+        mutation_service: DispatcherMutationService,
+    ) -> None:
         self._state_store = state_store
+        self._mutation_service = mutation_service
 
     def get_history(
         self,
@@ -32,8 +38,10 @@ class DispatcherHistoryService:
           return a `History` to override the in-memory result. Returning `None` keeps
           the in-memory result.
         """
-        in_memory_history = self._get_in_memory_history(
-            from_time, to_time, resolve_operations, limit
+        in_memory_history = self._mutation_service.execute(
+            lambda: self._get_in_memory_history(
+                from_time, to_time, resolve_operations, limit
+            ).model_copy(deep=True)
         )
         if self._state_store.on_history_callback is None:
             return in_memory_history
@@ -44,7 +52,7 @@ class DispatcherHistoryService:
         if callback_result is None:
             return in_memory_history
         if isinstance(callback_result, History):
-            return callback_result
+            return callback_result.model_copy(deep=True)
         else:
             raise ValueError(
                 "Invalid return type from on_history_callback, expected History or None"

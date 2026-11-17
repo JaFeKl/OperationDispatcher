@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable
 from uuid import UUID
 
 from flask import Flask
@@ -22,7 +21,6 @@ from operation_dispatcher import (
 from operation_dispatcher.operation_dispatcher_mcp import (
     DispatcherMCPPrompts,
     DispatcherMCPResources,
-    DispatcherMCPTools,
 )
 from operation_dispatcher.runtime_controller import OperationDispatcherRuntimeController
 
@@ -63,7 +61,7 @@ class DemoDispatcherService:
             self.operation_dispatcher
         )
         self.operation_dispatcher_api = OperationDispatcherOpenAPI(
-            self.operation_dispatcher
+            self.operation_dispatcher, runtime_controller=self._runtime_controller
         )
 
         self.visualizer = BrowserEventVisualizer(
@@ -110,6 +108,15 @@ class DemoDispatcherService:
             )
             print("Started operation with payload:", operation.payload)
             return True
+        if event.event_type in {
+            EventType.OPERATION_CANCEL_REQUESTED,
+            EventType.OPERATION_COMPLETE_REQUESTED,
+        }:
+            return self._simulated_runner.cancel(operation_id=operation.id)
+        if event.event_type is EventType.OPERATION_PAUSE_REQUESTED:
+            return self._simulated_runner.pause(operation_id=operation.id)
+        if event.event_type is EventType.OPERATION_RESUME_REQUESTED:
+            return self._simulated_runner.resume(operation_id=operation.id)
         return None
 
     def _on_notification(self, event: DispatchEvent) -> None:
@@ -181,7 +188,7 @@ class DemoDispatcherService:
             ),
             host=self._host,
             port=self._mcp_port,
-            tools=list(DispatcherMCPTools),
+            runtime_controller=self._runtime_controller,
             resources=list(DispatcherMCPResources),
             prompts=list(DispatcherMCPPrompts),
             json_response=True,
