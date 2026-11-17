@@ -1,7 +1,7 @@
-# Preparing applications for 1.0
+# Migrating applications to 1.0.0
 
-These changes are in the working version leading to 1.0.0. The package version
-remains 0.1.0 until the release is deliberately prepared and tagged.
+This guide describes the changes applications need when upgrading from the
+0.x versions to 1.0.0.
 
 ## Operation ownership and updates
 

@@ -1,5 +1,8 @@
 # Operation Dispatcher
 
+[![PyPI version](https://img.shields.io/pypi/v/operation-dispatcher.svg)](https://pypi.org/project/operation-dispatcher/)
+[![Python versions](https://img.shields.io/pypi/pyversions/operation-dispatcher.svg)](https://pypi.org/project/operation-dispatcher/)
+
 Operation Dispatcher is a lightweight Python framework for scheduling and supervising operations for a **single resource**, such as a robot, machine, workstation, or transport vehicle. Each dispatcher maintains a queue, allows at most one active operation, requests approval for lifecycle actions, and records events and operation history.
 
 Your application performs the actual work and reports completion or failure. The dispatcher coordinates that work; adding an operation or approving its start does not execute its payload.
@@ -196,8 +199,8 @@ All event enum names below use the `OPERATION_` prefix; serialized values are lo
 | Group | Event names |
 | --- | --- |
 | Dispatcher lifecycle | `OPERATION_DISPATCHER_STARTED`, `OPERATION_DISPATCHER_STOPPED`, `OPERATION_DISPATCHER_PAUSED`, `OPERATION_DISPATCHER_RESUMED` |
-| Requests | `OPERATION_START_REQUESTED`, `OPERATION_CANCEL_REQUESTED`, `OPERATION_PAUSE_REQUESTED`, `OPERATION_RESUME_REQUESTED` |
-| Denials | `OPERATION_START_DENIED`, `OPERATION_CANCEL_DENIED`, `OPERATION_PAUSE_DENIED`, `OPERATION_RESUME_DENIED` |
+| Requests | `OPERATION_START_REQUESTED`, `OPERATION_CANCEL_REQUESTED`, `OPERATION_PAUSE_REQUESTED`, `OPERATION_RESUME_REQUESTED`, `OPERATION_COMPLETE_REQUESTED` |
+| Denials | `OPERATION_START_DENIED`, `OPERATION_CANCEL_DENIED`, `OPERATION_PAUSE_DENIED`, `OPERATION_RESUME_DENIED`, `OPERATION_COMPLETE_DENIED` |
 | Operation lifecycle | `OPERATION_ADDED`, `OPERATION_UPDATED`, `OPERATION_STARTED`, `OPERATION_PAUSED`, `OPERATION_RESUMED`, `OPERATION_COMPLETED`, `OPERATION_FAILED`, `OPERATION_CANCELLED` |
 
 Configure in-memory event retention once when constructing the dispatcher:
@@ -340,4 +343,4 @@ ruff check src tests
 
 API and MCP tests skip when their extras are absent. Node.js enables the browser-rendering regression. CI also builds and tests installed distributions outside the checkout. See [release instructions](docs/RELEASING.md), [migration notes](docs/MIGRATING_TO_1_0.md), and the [changelog](CHANGELOG.md).
 
-Licensed under [GPLv3](LICENSE). Package version: `0.1.0`.
+Licensed under [GPLv3](LICENSE). Package version: `1.0.0`.

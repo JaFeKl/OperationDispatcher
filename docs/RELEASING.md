@@ -1,6 +1,6 @@
 # Preparing a release
 
-The working package remains version 0.1.0. Ordinary CI runs do not publish.
+The package is prepared for version 1.0.0. Ordinary CI runs do not publish.
 Pushing a `v*` tag starts the release workflow; publication waits for the test
 matrix and the configured `pypi` environment approval.
 
@@ -75,7 +75,7 @@ The pending publisher on PyPI must match these values:
 | --- | --- |
 | Project | `operation-dispatcher` |
 | Repository owner | `JaFeKl` |
-| Repository | `OperationScheduler` |
+| Repository | `OperationDispatcher` |
 | Workflow filename | `release.yml` |
 | GitHub environment | `pypi` |
 

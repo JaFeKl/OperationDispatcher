@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "operation-dispatcher"
-version = "0.9.0"
+version = "1.0.0"
 description = "Lightweight operation dispatcher package for managing and executing operations"
 readme = "README.md"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.12,<3.16"
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -44,8 +44,8 @@ vis = [
 ]
 
 [project.urls]
-Repository = "https://github.com/JaFeKl/OperationScheduler"
-Issues = "https://github.com/JaFeKl/OperationScheduler/issues"
+Repository = "https://github.com/JaFeKl/OperationDispatcher"
+Issues = "https://github.com/JaFeKl/OperationDispatcher/issues"
 
 [tool.ruff.lint]
 select = ["F", "E9"]
