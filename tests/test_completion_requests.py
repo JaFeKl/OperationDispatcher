@@ -26,7 +26,9 @@ def active_dispatcher(callback=lambda event: True, **kwargs):
     )
     operation = Operation(resource_id="resource-a", payload={})
     dispatcher.add_operation(operation)
-    assert asyncio.run(dispatcher.step_dispatch()).id == operation.id
+    started = asyncio.run(dispatcher.step_dispatch())
+    assert started is not None, dispatcher.get_history().model_dump_json()
+    assert started.id == operation.id
     return dispatcher, operation
 
 
@@ -87,7 +89,7 @@ def test_approved_completion_records_decision_and_releases_slot(outcome, paused)
 @pytest.mark.parametrize(
     "behavior", ["missing", "false", "invalid", "exception", "timeout", "async_timeout"]
 )
-def test_completion_denial_keeps_operation_and_does_not_pause(behavior):
+def test_completion_denial_keeps_operation_and_does_not_pause(behavior, monkeypatch):
     release = threading.Event()
     finished = threading.Event()
 
@@ -119,8 +121,15 @@ def test_completion_denial_keeps_operation_and_does_not_pause(behavior):
     dispatcher, operation = active_dispatcher(
         None if behavior == "missing" else callback,
         start_request_max_retries=1,
-        request_event_timeout_seconds=0.05,
     )
+    # Keep the normal startup deadline: scheduling worker threads can take more
+    # than 50 ms on CI. The short deadline belongs only to completion timeouts.
+    if behavior in {"timeout", "async_timeout"}:
+        monkeypatch.setattr(
+            dispatcher._state_store.request_handler,
+            "_request_event_timeout_seconds",
+            0.05,
+        )
     before = dispatcher.get_operation(operation.id).model_dump()
     try:
         for _ in range(2):
